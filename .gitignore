@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# User data and generated reports
+*.xlsx
+*.xlsm
+*.xls
+*.csv
+*.failure.log
+output/
+
+# Tests and captured fixtures are kept locally only.
+tests/
+
+# Build artifacts and Windows executables
+build/
+dist/
+release/
+*.exe
+*.msi
+*.spec.bak
+
+# IDE and OS files
+.vscode/
+.vs/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini

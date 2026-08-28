@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sales-data-collector"
+version = "0.1.0"
+description = "Windows-friendly sales data collector"
+requires-python = ">=3.13"
+dependencies = [
+  "requests>=2.31",
+  "openpyxl>=3.1",
+  "beautifulsoup4>=4.12",
+]
+
+[project.scripts]
+sales-data-collector = "sales_data_collector.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,1 @@
+"""Sales-admin template resolution."""
