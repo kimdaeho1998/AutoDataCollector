@@ -12,6 +12,8 @@ from .models import (
     DailySalesRecord,
     DeliveryChannelRecord,
     DeliverySalesResult,
+    MenuMonthlySalesResult,
+    MenuSalesRecord,
     MonthlySalesRecord,
     PeriodSalesResult,
     ProductSalesResult,
@@ -124,6 +126,106 @@ class ProductSalesParser:
         if count is None or sales is None:
             raise ParseError("product summary is missing")
         return ProductSalesResult(product_count=count, sales_amount=sales)
+
+
+class MenuSalesParser:
+    """Parse raw menu sales rows without applying canonical menu mapping."""
+
+    menu_keywords = ("메뉴", "상품")
+    quantity_keywords = ("수량", "건수", "개수")
+    amount_keywords = ("매출", "금액", "합계")
+    empty_keywords = ("조회된 데이터가 없습니다", "데이터가 없습니다", "검색 결과가 없습니다")
+
+    def parse(self, html: str, *, store_id: str, store_name: str, period_start: date, period_end: date) -> MenuMonthlySalesResult:
+        soup = BeautifulSoup(html, "html.parser")
+        records = self._parse_tables(soup, store_id, store_name, period_start, period_end)
+        if not records and self._is_empty_result(soup):
+            return MenuMonthlySalesResult(store_id, store_name, period_start, period_end, [], self._source_total(soup))
+        if not records:
+            raise ParseError("menu sales response contains no parseable menu rows")
+        return MenuMonthlySalesResult(store_id, store_name, period_start, period_end, records, self._source_total(soup))
+
+    def _parse_tables(self, soup: BeautifulSoup, store_id: str, store_name: str, period_start: date, period_end: date) -> list[MenuSalesRecord]:
+        records: list[MenuSalesRecord] = []
+        for table in soup.find_all("table"):
+            rows = table.find_all("tr")
+            if len(rows) < 2:
+                continue
+            headers = [self._cell_text(cell) for cell in rows[0].find_all(["th", "td"])]
+            indexes = self._resolve_indexes(headers)
+            if indexes is None:
+                continue
+            menu_idx, quantity_idx, amount_idx = indexes
+            for row in rows[1:]:
+                cells = [self._cell_text(cell) for cell in row.find_all(["th", "td"])]
+                if not cells or max(menu_idx, amount_idx) >= len(cells):
+                    continue
+                menu_name = cells[menu_idx].strip()
+                if not menu_name or self._looks_like_total(menu_name):
+                    continue
+                if not self._has_number(cells[amount_idx]):
+                    continue
+                sales_amount = clean_int(cells[amount_idx])
+                sales_quantity = clean_int(cells[quantity_idx]) if quantity_idx is not None and quantity_idx < len(cells) else None
+                records.append(
+                    MenuSalesRecord(
+                        store_id=store_id,
+                        store_name=store_name,
+                        period_start=period_start,
+                        period_end=period_end,
+                        menu_name=menu_name,
+                        sales_quantity=sales_quantity,
+                        sales_amount=sales_amount,
+                    )
+                )
+        return records
+
+    def _resolve_indexes(self, headers: list[str]) -> tuple[int, int | None, int] | None:
+        normalized = [header.replace(" ", "") for header in headers]
+        menu_idx = self._find_index(normalized, self.menu_keywords)
+        amount_candidates = [
+            idx
+            for idx, header in enumerate(normalized)
+            if any(keyword in header for keyword in self.amount_keywords)
+        ]
+        amount_idx = amount_candidates[-1] if amount_candidates else None
+        quantity_idx = self._find_index(normalized, self.quantity_keywords)
+        if menu_idx is None or amount_idx is None:
+            return None
+        return menu_idx, quantity_idx, amount_idx
+
+    @staticmethod
+    def _find_index(headers: list[str], keywords: tuple[str, ...]) -> int | None:
+        for idx, header in enumerate(headers):
+            if any(keyword in header for keyword in keywords):
+                return idx
+        return None
+
+    @staticmethod
+    def _cell_text(cell) -> str:
+        return cell.get_text(" ", strip=True) if cell else ""
+
+    @classmethod
+    def _is_empty_result(cls, soup: BeautifulSoup) -> bool:
+        text = soup.get_text(" ", strip=True)
+        return any(keyword in text for keyword in cls.empty_keywords)
+
+    @staticmethod
+    def _looks_like_total(value: str) -> bool:
+        compact = value.replace(" ", "")
+        return compact in {"합계", "총계", "전체", "소계", "TOTAL", "총합계", "전체합계", "메뉴합계"}
+
+    @staticmethod
+    def _has_number(value: str) -> bool:
+        return bool(_NUMBER.search(value))
+
+    @staticmethod
+    def _source_total(soup: BeautifulSoup) -> int | None:
+        for label in ("매출합계", "합계", "총매출", "총 매출"):
+            value = _summary_value(soup, label)
+            if value is not None:
+                return value
+        return None
 
 
 class TodayStoreSalesParser:

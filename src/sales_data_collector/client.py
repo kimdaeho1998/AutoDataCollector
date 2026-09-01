@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 from .exceptions import AuthenticationError, HttpError, ParseError
 from .models import (
     DailySalesRecord,
+    MenuMonthlySalesResult,
     MonthlySalesRecord,
     PeriodSalesResult,
     ProductSalesResult,
@@ -19,7 +20,7 @@ from .models import (
     TodayStoreSalesResult,
 )
 from .parser import ServiceSalesParser
-from .source_parsers import DailySalesParser, MonthlySalesParser, PeriodSalesParser, ProductSalesParser, TodayStoreSalesParser
+from .source_parsers import DailySalesParser, MenuSalesParser, MonthlySalesParser, PeriodSalesParser, ProductSalesParser, TodayStoreSalesParser
 from .utils import format_ymd
 
 
@@ -54,24 +55,15 @@ class ServiceClient:
         self.base_url = base_url.rstrip("/")
         self.session = session or requests.Session()
         self.endpoints = endpoints or ServiceEndpoints()
-        missing_paths = [
-            name
-            for name, value in vars(self.endpoints).items()
-            if name.endswith("_path") and not value
-        ]
-        if missing_paths:
-            raise ValueError(
-                "Service endpoint configuration is missing: " + ", ".join(sorted(missing_paths))
-            )
         self.timeout = timeout
         self.parser = parser or ServiceSalesParser()
 
     def login(self, user_id: str, password: str) -> None:
         # Captured browser workflow: entry page, login form submit, then completion page.
-        entry = self.session.get(self._url(self.endpoints.login_path), timeout=self.timeout)
+        entry = self.session.get(self._url(self._require_path("login_path")), timeout=self.timeout)
         self._ensure_ok(entry)
         response = self.session.post(
-            self._url(self.endpoints.login_submit_path),
+            self._url(self._require_path("login_submit_path")),
             data={
                 "url": "/",
                 "viewtype": "",
@@ -93,12 +85,12 @@ class ServiceClient:
         self._ensure_ok(response)
         if self._looks_like_login_failure(response.text):
             raise AuthenticationError("login failed")
-        complete = self.session.get(self._url(self.endpoints.login_complete_path), timeout=self.timeout)
+        complete = self.session.get(self._url(self._require_path("login_complete_path")), timeout=self.timeout)
         self._ensure_ok(complete)
 
     def get_stores(self, brand_idx: str, store_use: str = "Y") -> list[Store]:
         response = self.session.post(
-            self._url(self.endpoints.store_list_path),
+            self._url(self._require_path("store_list_path")),
             data={"cmd": "getStore", "brand_idx": brand_idx, "store_use": store_use},
             timeout=self.timeout,
         )
@@ -141,7 +133,7 @@ class ServiceClient:
             "storeidx": store_idx,
             "txtstoreidx": store_name,
         }
-        response = self.session.post(self._url(self.endpoints.sales_search_path), data=payload, timeout=self.timeout)
+        response = self.session.post(self._url(self._require_path("sales_search_path")), data=payload, timeout=self.timeout)
         self._ensure_ok(response)
         return self.parser.parse_sales_page(
             response.text,
@@ -152,7 +144,7 @@ class ServiceClient:
 
     def get_daily_sales(self, *, year: int, month: int, brand_idx: str, brand_name: str, store_idx: str, store_name: str) -> list[DailySalesRecord]:
         response = self.session.post(
-            self._url(self.endpoints.daily_sales_path),
+            self._url(self._require_path("daily_sales_path")),
             data=self._store_payload(brand_idx, brand_name, store_idx, store_name, srchYear=str(year), txtsrchYear=str(year), srchMonth=f"{month:02d}", txtsrchMonth=f"{month:02d}", storeidx_str="", usFranOrStore="1"),
             timeout=self.timeout,
         )
@@ -161,7 +153,7 @@ class ServiceClient:
 
     def get_period_sales(self, *, start_date: date, end_date: date, brand_idx: str, brand_name: str, store_idx: str, store_name: str) -> PeriodSalesResult:
         response = self.session.post(
-            self._url(self.endpoints.period_sales_path),
+            self._url(self._require_path("period_sales_path")),
             data=self._store_payload(
                 brand_idx,
                 brand_name,
@@ -181,7 +173,7 @@ class ServiceClient:
 
     def get_monthly_sales(self, *, year: int, brand_idx: str, brand_name: str, store_idx: str, store_name: str) -> list[MonthlySalesRecord]:
         response = self.session.post(
-            self._url(self.endpoints.monthly_sales_path),
+            self._url(self._require_path("monthly_sales_path")),
             data=self._store_payload(brand_idx, brand_name, store_idx, store_name, startDate=str(year), txtstartDate=str(year), storeidx_str="", usFranOrStore="1"),
             timeout=self.timeout,
         )
@@ -190,12 +182,39 @@ class ServiceClient:
 
     def get_product_sales(self, *, business_date: date, brand_idx: str, brand_name: str, store_idx: str, store_name: str) -> ProductSalesResult:
         response = self.session.post(
-            self._url(self.endpoints.product_sales_path),
+            self._url(self._require_path("product_sales_path")),
             data=self._store_payload(brand_idx, brand_name, store_idx, store_name, startDate=format_ymd(business_date), endDate=format_ymd(business_date), storeidx_str="", usFranOrStore="1"),
             timeout=self.timeout,
         )
         self._ensure_ok(response)
         return ProductSalesParser().parse(response.text)
+
+    def get_menu_monthly_sales(self, *, start_date: date, end_date: date, brand_idx: str, brand_name: str, store_idx: str, store_name: str) -> MenuMonthlySalesResult:
+        response = self.session.post(
+            self._url(self._require_path("product_sales_path")),
+            data=self._store_payload(
+                brand_idx,
+                brand_name,
+                store_idx,
+                store_name,
+                startDate=format_ymd(start_date),
+                endDate=format_ymd(end_date),
+                storeidx_str="",
+                usFranOrStore="1",
+            ),
+            timeout=self.timeout,
+        )
+        self._ensure_ok(response)
+        try:
+            return MenuSalesParser().parse(
+                response.text,
+                store_id=store_idx,
+                store_name=store_name,
+                period_start=start_date,
+                period_end=end_date,
+            )
+        except ParseError as exc:
+            raise ParseError(f"{exc}; response={self._safe_menu_response_shape(response.text)}") from exc
 
     def get_today_store_gross_sales(self, *, business_date: date, brand_idx: str, store_idx: str, store_name: str) -> int:
         return self.get_today_store_sales(
@@ -208,7 +227,7 @@ class ServiceClient:
     def get_today_store_sales(self, *, business_date: date, brand_idx: str, store_idx: str, store_name: str) -> TodayStoreSalesResult:
         """Use the confirmed POST contract for the date-specific gross-sales field."""
         response = self.session.post(
-            self._url(self.endpoints.today_store_sales_path),
+            self._url(self._require_path("today_store_sales_path")),
             data={
                 "brandidx": brand_idx,
                 "storeidx": store_idx,
@@ -245,6 +264,12 @@ class ServiceClient:
             return path
         return f"{self.base_url}{path}"
 
+    def _require_path(self, endpoint_name: str) -> str:
+        value = getattr(self.endpoints, endpoint_name)
+        if not value:
+            raise ValueError(f"Service endpoint configuration is missing: {endpoint_name}")
+        return value
+
     def _ensure_ok(self, response: requests.Response) -> None:
         if response.status_code >= 400:
             raise HttpError(f"unexpected HTTP status: {response.status_code} ({response.request.method} {response.url})")
@@ -266,6 +291,28 @@ class ServiceClient:
         actions = [str(form.get("action", "")) for form in soup.select("form")]
         input_names = [str(field.get("name", "")) for field in soup.select("input[name]")]
         return f"title={title[:80]!r}, actions={actions[:5]!r}, input_names={input_names[:20]!r}"
+
+    @staticmethod
+    def _safe_menu_response_shape(html: str) -> str:
+        """Expose menu page structure without dumping operating rows or credentials."""
+        soup = BeautifulSoup(html, "html.parser")
+        title = soup.title.get_text(" ", strip=True) if soup.title else "none"
+        table_headers = []
+        for table in soup.find_all("table")[:5]:
+            rows = table.find_all("tr")[:3]
+            table_headers.append(
+                [
+                    cell.get_text(" ", strip=True)[:40]
+                    for row in rows
+                    for cell in row.find_all(["th", "td"])[:12]
+                ][:12]
+            )
+        input_names = [str(field.get("name", "")) for field in soup.select("input[name]")[:20]]
+        classes = sorted({name for tag in soup.find_all(True) for name in (tag.get("class") or [])})[:30]
+        return (
+            f"title={title[:80]!r}, table_count={len(soup.find_all('table'))}, "
+            f"table_headers={table_headers!r}, input_names={input_names!r}, classes={classes!r}"
+        )
 
     @staticmethod
     def _looks_like_login_page(text: str) -> bool:
