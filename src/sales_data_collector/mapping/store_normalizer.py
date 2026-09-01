@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import Enum
 
@@ -10,7 +11,8 @@ class StoreMatchStatus(str, Enum):
     AMBIGUOUS = "AMBIGUOUS"
 
 
-def normalize_store_name(name: str, brand_prefix: str = "\uc120\ube44\uaf2c\ub9c8\uae40\ubc25") -> str:
+def normalize_store_name(name: str, brand_prefix: str | None = None) -> str:
+    brand_prefix = brand_prefix if brand_prefix is not None else os.environ.get("COLLECTOR_BRAND_PREFIX", "")
     value = " ".join(name.split())
     return value[len(brand_prefix):].strip() if value.startswith(brand_prefix) else value
 

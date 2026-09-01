@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import os
 from datetime import date
 from getpass import getpass
@@ -43,6 +44,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", help="Output xlsx path (legacy diagnostic mode)")
     parser.add_argument("--production-dry-run", action="store_true", help="Preview one production workbook update without writing.")
     parser.add_argument("--production-write", action="store_true", help="Copy a workbook and write confirmed production updates.")
+    parser.add_argument("--menu-monthly-preview", action="store_true", help="Preview one store's monthly menu sales without writing.")
+    parser.add_argument("--year", type=int, help="Collection year for monthly preview modes.")
+    parser.add_argument("--month", type=int, help="Collection month for monthly preview modes.")
     parser.add_argument("--date", action="append", default=[], help="YYYY-MM-DD. Repeat for multi-date production dry-run; defaults to yesterday.")
     parser.add_argument("--template", help="Sales-admin workbook path for production dry-run mode.")
     parser.add_argument("--production-output", help="Output xlsx path for production write mode.")
@@ -82,6 +86,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.production_dry_run and args.production_write:
             parser.error("--production-dry-run and --production-write cannot be used together")
+        if args.menu_monthly_preview:
+            return run_menu_monthly_preview(args)
         if args.production_dry_run or args.production_write:
             return run_production_mode(args, write=args.production_write)
         if not args.start_date or not args.end_date or not args.output:
@@ -165,6 +171,68 @@ def run_production_mode(args: argparse.Namespace, *, write: bool) -> int:
         result = SalesAdminSingleDayWriter(args.template).write(preview, output)
         print(f"[WRITE] output={result.output_path}")
         print(f"[WRITE] cells_written={result.changes_written} original_unchanged={result.original_hash_before == result.original_hash_after}")
+        return 0
+    finally:
+        client.logout()
+
+
+def run_menu_monthly_preview(args: argparse.Namespace) -> int:
+    if not args.year or not args.month:
+        raise ValueError("--year and --month are required for --menu-monthly-preview")
+    if args.month < 1 or args.month > 12:
+        raise ValueError("--month must be between 1 and 12")
+    if args.all_stores or args.store_idx:
+        raise ValueError("--menu-monthly-preview supports one --store-name only in STEP M-01")
+    if len(args.store_name) != 1:
+        raise ValueError("--menu-monthly-preview requires exactly one --store-name")
+
+    period_start = date(args.year, args.month, 1)
+    period_end = date(args.year, args.month, calendar.monthrange(args.year, args.month)[1])
+    client = ServiceClient(args.base_url)
+    try:
+        print(f"[INFO] Menu monthly preview target: {period_start.isoformat()} ~ {period_end.isoformat()}")
+        available_stores = login_and_get_stores(client, args)
+        stores = resolve_stores(
+            available_stores,
+            all_stores=False,
+            store_ids=(),
+            store_names=args.store_name,
+        )
+        if not stores:
+            raise ValueError("STORE_NOT_FOUND")
+        if len(stores) > 1:
+            raise ValueError("AMBIGUOUS_STORE_NAME")
+        store = stores[0]
+        result = client.get_menu_monthly_sales(
+            start_date=period_start,
+            end_date=period_end,
+            brand_idx=args.brand_idx,
+            brand_name=args.brand_name,
+            store_idx=store.magic_store_id,
+            store_name=store.store_name,
+        )
+        parsed_sum = sum(record.sales_amount for record in result.records)
+        total_match = "NOT_AVAILABLE" if result.source_total_sales is None else ("YES" if parsed_sum == result.source_total_sales else "NO")
+        print("=" * 120)
+        print("MENU MONTHLY PREVIEW")
+        print("=" * 120)
+        print(f"STORE_ID={result.store_id}")
+        print(f"STORE_NAME={result.store_name}")
+        print(f"PERIOD_START={result.period_start.isoformat()}")
+        print(f"PERIOD_END={result.period_end.isoformat()}")
+        print("SOURCE_STATUS=SUCCESS")
+        print("-" * 120)
+        print("MENU")
+        print("-" * 120)
+        for idx, record in enumerate(result.records, 1):
+            qty = "N/A" if record.sales_quantity is None else f"{record.sales_quantity:,}"
+            print(f"{idx:02d} | {record.menu_name} | QTY={qty} | SALES={record.sales_amount:,}")
+        print("-" * 120)
+        print(f"MENU_ROW_COUNT={len(result.records)}")
+        print(f"PARSED_SALES_SUM={parsed_sum:,}")
+        print(f"SOURCE_TOTAL={'NOT_AVAILABLE' if result.source_total_sales is None else f'{result.source_total_sales:,}'}")
+        print(f"TOTAL_MATCH={total_match}")
+        print("=" * 120)
         return 0
     finally:
         client.logout()

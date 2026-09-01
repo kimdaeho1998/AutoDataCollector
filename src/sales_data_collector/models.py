@@ -116,6 +116,27 @@ class ProductSalesResult:
 
 
 @dataclass(frozen=True)
+class MenuSalesRecord:
+    store_id: str
+    store_name: str
+    period_start: date
+    period_end: date
+    menu_name: str
+    sales_amount: int
+    sales_quantity: int | None = None
+
+
+@dataclass(frozen=True)
+class MenuMonthlySalesResult:
+    store_id: str
+    store_name: str
+    period_start: date
+    period_end: date
+    records: list[MenuSalesRecord]
+    source_total_sales: int | None = None
+
+
+@dataclass(frozen=True)
 class DeliveryChannelRecord:
     channel_name: str
     order_count: int | None
