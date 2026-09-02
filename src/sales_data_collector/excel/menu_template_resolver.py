@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
@@ -315,6 +315,34 @@ def resolve_store_sales_row(
         normalized_store_name=normalized_source,
         excel_store_name=None,
         match_source=None,
+    )
+
+
+def reresolve_store_sales_row(
+    worksheet,
+    profile: MenuTemplateProfile,
+    store_name: str,
+) -> StoreMenuRow:
+    """
+    Resolve one store against the CURRENT worksheet state.
+
+    This function exists for sequential multi-store menu writes.
+
+    A physical quantity-row insertion shifts every following store.
+    Therefore row coordinates captured from an earlier workbook state
+    must not be reused.
+
+    The current worksheet is always scanned again through the existing
+    deterministic resolve_store_sales_row() implementation.
+
+    No fuzzy matching and no accumulated row-offset calculation are
+    allowed here.
+    """
+
+    return resolve_store_sales_row(
+        worksheet,
+        profile,
+        store_name,
     )
 
 def formula_protected_columns(worksheet, row_index: int, columns: Iterable[int]) -> tuple[str, ...]:
