@@ -13,6 +13,7 @@ from openpyxl import load_workbook
 from .client import ServiceClient
 from .collector import collect_sales, export_sales
 from .excel.menu_excel_dry_run import CellPlanStatus, build_menu_excel_dry_run_plan, summarize_other_residual_by_reason
+from .excel.menu_copy_writer import MenuMonthlyCopyWriter
 from .excel.menu_template_profile import DAEGU_JULY_PROFILE, DAEJEON_JULY_PROFILE, MenuTemplateProfile
 from .exceptions import AuthenticationError, ServiceError
 from .models import CollectionMode, ExportFormat, SalesAdminDailyRecord, Store
@@ -50,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--menu-monthly-preview", action="store_true", help="Preview one store's monthly menu sales without writing.")
     parser.add_argument("--menu-mapping-preview", action="store_true", help="Preview raw menu normalization and mapping without writing.")
     parser.add_argument("--menu-excel-dry-run", action="store_true", help="Plan monthly menu Excel updates without writing or saving.")
+    parser.add_argument("--menu-excel-write-copy", action="store_true", help="Copy a menu workbook and safely write one monthly menu update.")
     parser.add_argument("--year", type=int, help="Collection year for monthly preview modes.")
     parser.add_argument("--month", type=int, help="Collection month for monthly preview modes.")
     parser.add_argument("--date", action="append", default=[], help="YYYY-MM-DD. Repeat for multi-date production dry-run; defaults to yesterday.")
@@ -93,6 +95,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error("--production-dry-run and --production-write cannot be used together")
         if args.menu_mapping_preview and not args.menu_monthly_preview:
             args.menu_monthly_preview = True
+        if args.menu_excel_dry_run and args.menu_excel_write_copy:
+            parser.error("--menu-excel-dry-run and --menu-excel-write-copy cannot be used together")
+        if args.menu_excel_write_copy:
+            return run_menu_excel_write_copy(args)
         if args.menu_excel_dry_run:
             return run_menu_excel_dry_run(args)
         if args.menu_monthly_preview:
@@ -390,6 +396,128 @@ def run_menu_excel_dry_run(args: argparse.Namespace) -> int:
         return 0 if _menu_dry_run_is_pass(plan) else 1
     finally:
         client.logout()
+
+
+def run_menu_excel_write_copy(args: argparse.Namespace) -> int:
+    if not args.output:
+        raise ValueError("--output is required for --menu-excel-write-copy")
+    plan_context = _build_menu_excel_plan_from_args(args)
+    plan = plan_context["plan"]
+    profile = plan_context["profile"]
+    print_menu_excel_plan(plan, profile)
+    if not _menu_dry_run_is_pass(plan):
+        raise ValueError("MENU_EXCEL_DRY_RUN_GATE_FAILED")
+    result = MenuMonthlyCopyWriter(args.template).write_copy(
+        plan,
+        args.output,
+        profile,
+        year=args.year,
+        month=args.month,
+    )
+    print("=" * 120)
+    print("MENU EXCEL COPY WRITE")
+    print("=" * 120)
+    print(f"SOURCE={result.source_path}")
+    print(f"OUTPUT={result.output_path}")
+    print(f"STORE={result.store}")
+    print(f"PERIOD={result.period}")
+    print(f"WRITTEN_CELLS={result.written_cells}")
+    print(f"SAME_VALUE_CELLS={result.same_value_cells}")
+    print(f"ANALYSIS_ROWS={result.analysis_rows}")
+    print(f"SALES_RECONCILIATION={'PASS' if result.sales_reconciliation else 'FAIL'}")
+    print(f"QUANTITY_RECONCILIATION={'PASS' if result.quantity_reconciliation else 'FAIL'}")
+    print(f"FORMULA_VALIDATION={'PASS' if result.formula_protection else 'FAIL'}")
+    print(f"ORIGINAL_UNCHANGED={'YES' if result.original_unchanged else 'NO'}")
+    print("=" * 120)
+    return 0
+
+
+def _build_menu_excel_plan_from_args(args: argparse.Namespace) -> dict:
+    if not args.template:
+        raise ValueError("--template is required for menu Excel mode")
+    if not args.year or not args.month:
+        raise ValueError("--year and --month are required for menu Excel mode")
+    if args.month < 1 or args.month > 12:
+        raise ValueError("--month must be between 1 and 12")
+    if args.all_stores or args.store_idx:
+        raise ValueError("menu Excel mode supports one --store-name only")
+    if len(args.store_name) != 1:
+        raise ValueError("menu Excel mode requires exactly one --store-name")
+
+    workbook = load_workbook(args.template, data_only=False)
+    profile = infer_menu_template_profile(workbook)
+    worksheet = workbook[profile.sheet_name]
+    period_start = date(args.year, args.month, 1)
+    period_end = date(args.year, args.month, calendar.monthrange(args.year, args.month)[1])
+    client = ServiceClient(args.base_url)
+    try:
+        print(f"[INFO] Menu Excel target: {period_start.isoformat()} ~ {period_end.isoformat()}")
+        available_stores = login_and_get_stores(client, args)
+        stores = resolve_stores(available_stores, all_stores=False, store_ids=(), store_names=args.store_name)
+        if not stores:
+            raise ValueError("STORE_NOT_FOUND")
+        if len(stores) > 1:
+            raise ValueError("AMBIGUOUS_STORE_NAME")
+        store = stores[0]
+        source = client.get_menu_monthly_sales(
+            start_date=period_start,
+            end_date=period_end,
+            brand_idx=args.brand_idx,
+            brand_name=args.brand_name,
+            store_idx=store.magic_store_id,
+            store_name=store.store_name,
+        )
+        mapping_preview = build_menu_mapping_preview(source)
+        plan = build_menu_excel_dry_run_plan(mapping_preview, worksheet, profile, store.store_name)
+        return {"plan": plan, "profile": profile}
+    finally:
+        client.logout()
+
+
+def print_menu_excel_plan(plan, profile) -> None:
+    breakdown = summarize_other_residual_by_reason(plan)
+    print("=" * 120)
+    print("MENU EXCEL DRY-RUN")
+    print("=" * 120)
+    print(f"PROFILE={profile.name}")
+    print(f"SHEET={profile.sheet_name}")
+    print(f"STORE={plan.store_name}")
+    print(f"ROW={plan.store_row or 'STORE_NOT_FOUND'}")
+    print(f"PERIOD={plan.source.source.period_start:%Y-%m}")
+    print(f"SOURCE_TOTAL={_money(plan.source_total_sales)}")
+    print(f"SOURCE_TOTAL_QUANTITY={'NOT_AVAILABLE' if plan.source.source.source_total_quantity is None else f'{plan.source.source.source_total_quantity:,}'}")
+    print(f"CURRENT_AC={plan.ac_plan.current_value!r}")
+    print(f"PROPOSED_AC={_money(plan.ac_plan.proposed_value)}")
+    print(f"AC_STATUS={plan.ac_plan.status.value}")
+    print(f"DIRECT_TARGET_TOTAL={_money(plan.direct_target_sales)}")
+    print(f"DIRECT_TARGET_QUANTITY={plan.direct_target_quantity:,}")
+    print(f"SOURCE_OTHER_RESIDUAL={_money(plan.source_other_residual)}")
+    print(f"OTHER_RESIDUAL_QUANTITY={plan.source_other_residual_quantity:,}")
+    print(f"OPTION_QUANTITY={plan.option_quantity:,}")
+    print(f"RAW_PRODUCT_COUNT={plan.raw_product_count:,}")
+    print(f"BUSINESS_MENU_COUNT={plan.business_menu_count:,}")
+    print(f"PROPOSED_OTHER_RESIDUAL={_money(plan.calculated_other_residual)}")
+    print(f"RESIDUAL_MATCH={'YES' if plan.residual_match else 'NO'}")
+    print(f"AB_FORMULA={plan.ab_validation.current_formula}")
+    print(f"AB_FORMULA_VALID={'YES' if plan.ab_validation.formula_valid else 'NO'}")
+    print(f"AB_WRITE_PLAN_COUNT={plan.ab_write_plan_count}")
+    print(f"AD_WRITE_PLAN_COUNT={plan.ad_write_plan_count}")
+    print("-" * 120)
+    print("CELL PLAN")
+    print("-" * 120)
+    for cell in plan.cells:
+        print(
+            f"COLUMN={cell.target_column} HEADER={cell.excel_group}/{cell.excel_header} "
+            f"CANONICAL={cell.canonical_code} CELL={cell.target_cell} "
+            f"QTY={_canonical_quantity(plan.source, cell.canonical_code):,} "
+            f"CURRENT={cell.current_value!r} PROPOSED={_money(cell.proposed_value)} STATUS={cell.status.value}"
+        )
+    print("-" * 120)
+    print("OTHER RESIDUAL BREAKDOWN")
+    print("-" * 120)
+    for key, value in breakdown.items():
+        print(f"{key}={_money(value)}")
+    print("=" * 120)
 
 
 def run_store_batch_production(args: argparse.Namespace, *, write: bool) -> int:
