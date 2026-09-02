@@ -22,7 +22,8 @@ from .mapping.template_resolver import SalesAdminTemplateResolver
 from .mapping.store_normalizer import normalize_store_name
 from .mapping.menu_mapping import MenuMappingStatus, build_menu_mapping_preview
 
-from .excel.menu_excel_dry_run import other_new_menu_inventoryfrom .writers.single_day_writer import SalesAdminSingleDayWriter
+from .excel.menu_excel_dry_run import other_new_menu_inventory
+from .writers.single_day_writer import SalesAdminSingleDayWriter
 from .utils import date_range, parse_ymd
 
 
@@ -723,4 +724,5 @@ def _canonical_quantity(mapping_preview, canonical_code: str) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
