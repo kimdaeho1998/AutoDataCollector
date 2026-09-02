@@ -309,10 +309,38 @@ class ServiceClient:
             )
         input_names = [str(field.get("name", "")) for field in soup.select("input[name]")[:20]]
         classes = sorted({name for tag in soup.find_all(True) for name in (tag.get("class") or [])})[:30]
+        selector_shapes = {
+            selector: ServiceClient._selector_shape(soup, selector)
+            for selector in (".detail", ".detail > li", ".detail2", ".detail2 > li", ".detail3", ".detail3 > li", ".detail_list2", ".detail_list2 > li", ".detail_title", ".detail_title2")
+        }
         return (
             f"title={title[:80]!r}, table_count={len(soup.find_all('table'))}, "
-            f"table_headers={table_headers!r}, input_names={input_names!r}, classes={classes!r}"
+            f"table_headers={table_headers!r}, input_names={input_names!r}, classes={classes!r}, "
+            f"selector_shapes={selector_shapes!r}"
         )
+
+    @staticmethod
+    def _selector_shape(soup: BeautifulSoup, selector: str) -> dict[str, Any]:
+        nodes = soup.select(selector)
+        samples = []
+        for node in nodes[:3]:
+            children = node.find_all(recursive=False)
+            samples.append(
+                {
+                    "tag": node.name,
+                    "classes": node.get("class") or [],
+                    "child_count": len(children),
+                    "children": [
+                        {
+                            "tag": child.name,
+                            "classes": child.get("class") or [],
+                        }
+                        for child in children[:6]
+                    ],
+                    "text": node.get_text(" ", strip=True)[:200],
+                }
+            )
+        return {"count": len(nodes), "samples": samples}
 
     @staticmethod
     def _looks_like_login_page(text: str) -> bool:

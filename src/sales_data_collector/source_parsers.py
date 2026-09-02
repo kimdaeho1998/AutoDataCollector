@@ -135,15 +135,121 @@ class MenuSalesParser:
     quantity_keywords = ("수량", "건수", "개수")
     amount_keywords = ("매출", "금액", "합계")
     empty_keywords = ("조회된 데이터가 없습니다", "데이터가 없습니다", "검색 결과가 없습니다")
+    detail_row_selectors = (".detail > li", ".detail2 > li", ".detail3 > li")
+    detail_group_selector = ".detail_title"
 
     def parse(self, html: str, *, store_id: str, store_name: str, period_start: date, period_end: date) -> MenuMonthlySalesResult:
         soup = BeautifulSoup(html, "html.parser")
-        records = self._parse_tables(soup, store_id, store_name, period_start, period_end)
+        records = self._parse_detail_rows(soup, store_id, store_name, period_start, period_end)
+        if not records:
+            records = self._parse_tables(soup, store_id, store_name, period_start, period_end)
         if not records and self._is_empty_result(soup):
             return MenuMonthlySalesResult(store_id, store_name, period_start, period_end, [], self._source_total(soup))
         if not records:
             raise ParseError("menu sales response contains no parseable menu rows")
         return MenuMonthlySalesResult(store_id, store_name, period_start, period_end, records, self._source_total(soup))
+
+    def _parse_detail_rows(self, soup: BeautifulSoup, store_id: str, store_name: str, period_start: date, period_end: date) -> list[MenuSalesRecord]:
+        records = self._parse_detail_title_children(soup, store_id, store_name, period_start, period_end)
+        if records:
+            return records
+
+        records: list[MenuSalesRecord] = []
+        for selector in self.detail_row_selectors:
+            for block in soup.select(selector):
+                title = self._detail_title(block)
+                body = self._detail_body(block)
+                if not title or self._looks_like_total(title) or body is None:
+                    continue
+                numbers = _numbers(_text(body))
+                if not numbers:
+                    continue
+                sales_amount = numbers[-1]
+                sales_quantity = numbers[-2] if len(numbers) >= 2 else None
+                records.append(
+                    MenuSalesRecord(
+                        store_id=store_id,
+                        store_name=store_name,
+                        period_start=period_start,
+                        period_end=period_end,
+                        menu_name=title,
+                        sales_quantity=sales_quantity,
+                        sales_amount=sales_amount,
+                    )
+                )
+            if records:
+                break
+        return records
+
+    def _parse_detail_title_children(self, soup: BeautifulSoup, store_id: str, store_name: str, period_start: date, period_end: date) -> list[MenuSalesRecord]:
+        records: list[MenuSalesRecord] = []
+        for group in self._unique_nodes(soup.select(self.detail_group_selector)):
+            for item in group.find_all("div", recursive=False):
+                record = self._record_from_menu_item_text(
+                    _text(item),
+                    store_id=store_id,
+                    store_name=store_name,
+                    period_start=period_start,
+                    period_end=period_end,
+                )
+                if record is not None:
+                    records.append(record)
+        return records
+
+    def _record_from_menu_item_text(
+        self,
+        text: str,
+        *,
+        store_id: str,
+        store_name: str,
+        period_start: date,
+        period_end: date,
+    ) -> MenuSalesRecord | None:
+        text = " ".join(text.split())
+        if not text:
+            return None
+        numeric_matches = list(_NUMBER.finditer(text))
+        if len(numeric_matches) < 3:
+            return None
+        unit_price_match, quantity_match, sales_match = numeric_matches[-3:]
+        menu_name = text[:unit_price_match.start()].strip()
+        if not menu_name or self._looks_like_total(menu_name):
+            return None
+        return MenuSalesRecord(
+            store_id=store_id,
+            store_name=store_name,
+            period_start=period_start,
+            period_end=period_end,
+            menu_name=menu_name,
+            sales_quantity=clean_int(quantity_match.group(0)),
+            sales_amount=clean_int(sales_match.group(0)),
+        )
+
+    @staticmethod
+    def _unique_nodes(nodes):
+        seen: set[int] = set()
+        for node in nodes:
+            key = id(node)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield node
+
+    @staticmethod
+    def _detail_title(block) -> str:
+        node = block.select_one(":scope > .detail_title, :scope > .detail_title2, :scope > .tit")
+        if node is not None:
+            return _text(node)
+        children = block.find_all(recursive=False)
+        return _text(children[0]) if children else ""
+
+    @staticmethod
+    def _detail_body(block):
+        node = block.select_one(":scope > .detail_1, :scope > .detail_2, :scope > .detail_3, :scope > .txt")
+        if node is not None:
+            return node
+        children = block.find_all(recursive=False)
+        return children[1] if len(children) > 1 else None
 
     def _parse_tables(self, soup: BeautifulSoup, store_id: str, store_name: str, period_start: date, period_end: date) -> list[MenuSalesRecord]:
         records: list[MenuSalesRecord] = []
