@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
@@ -193,129 +193,34 @@ def resolve_menu_target(worksheet, profile: MenuTemplateProfile, canonical_code:
     )
 
 
-def resolve_store_sales_row(
-    worksheet,
-    profile: MenuTemplateProfile,
-    store_name: str,
-) -> StoreMenuRow:
-    normalized_source = normalize_store_name(store_name)
-
-    exact_matches: list[tuple[int, str]] = []
-    normalized_matches: list[tuple[int, str]] = []
-
+def resolve_store_sales_row(worksheet, profile: MenuTemplateProfile, store_name: str) -> StoreMenuRow:
+    normalized = normalize_store_name(store_name)
+    matches: list[int] = []
+    excel_names: list[str] = []
     for row in range(1, worksheet.max_row + 1):
-        value = worksheet.cell(
-            row=row,
-            column=profile.store_column,
-        ).value
-
-        if not isinstance(value, str):
+        value = worksheet.cell(row=row, column=profile.store_column).value
+        if not isinstance(value, str) or normalize_store_name(value) != normalized:
             continue
-
-        sales_marker = worksheet.cell(
-            row=row,
-            column=profile.sales_marker_column,
-        ).value
-
-        if sales_marker != "매출":
+        if worksheet.cell(row=row, column=profile.sales_marker_column).value != "매출":
             continue
-
-        if row >= worksheet.max_row:
+        if worksheet.cell(row=row + 1, column=profile.sales_marker_column).value != "비율":
             continue
-
-        ratio_marker = worksheet.cell(
-            row=row + 1,
-            column=profile.sales_marker_column,
-        ).value
-
-        if ratio_marker != "비율":
-            continue
-
-        raw_excel_name = value.strip()
-
-        # ------------------------------------------------------------------
-        # Priority 1:
-        # exact source ↔ Excel store-name match.
-        # ------------------------------------------------------------------
-        if raw_excel_name == store_name.strip():
-            exact_matches.append((row, value))
-            continue
-
-        # ------------------------------------------------------------------
-        # Priority 2:
-        # Daily/Menu shared normalized identity.
-        # ------------------------------------------------------------------
-        normalized_excel = normalize_store_name(value)
-
-        if normalized_excel == normalized_source:
-            normalized_matches.append((row, value))
-
-    # ----------------------------------------------------------------------
-    # Exact raw match wins.
-    # ----------------------------------------------------------------------
-    if len(exact_matches) == 1:
-        row, excel_name = exact_matches[0]
-
-        return StoreMenuRow(
-            row_index=row,
-            store_name=store_name,
-            status=MenuTargetStatus.TARGET_RESOLVED,
-            reason="STORE_SALES_ROW_MATCHED",
-            normalized_store_name=normalized_source,
-            excel_store_name=excel_name,
-            match_source="daily_shared_exact",
-        )
-
-    if len(exact_matches) > 1:
-        return StoreMenuRow(
-            row_index=0,
-            store_name=store_name,
-            status=MenuTargetStatus.STORE_DUPLICATE,
-            reason="STORE_SALES_ROW_DUPLICATED_EXACT",
-            normalized_store_name=normalized_source,
-            excel_store_name=None,
-            match_source="daily_shared_exact",
-        )
-
-    # ----------------------------------------------------------------------
-    # Shared normalized match.
-    # ----------------------------------------------------------------------
-    if len(normalized_matches) == 1:
-        row, excel_name = normalized_matches[0]
-
-        return StoreMenuRow(
-            row_index=row,
-            store_name=store_name,
-            status=MenuTargetStatus.TARGET_RESOLVED,
-            reason="STORE_SALES_ROW_MATCHED",
-            normalized_store_name=normalized_source,
-            excel_store_name=excel_name,
-            match_source="daily_shared_normalized_exact",
-        )
-
-    if len(normalized_matches) > 1:
-        return StoreMenuRow(
-            row_index=0,
-            store_name=store_name,
-            status=MenuTargetStatus.STORE_DUPLICATE,
-            reason="STORE_SALES_ROW_DUPLICATED_NORMALIZED",
-            normalized_store_name=normalized_source,
-            excel_store_name=None,
-            match_source="daily_shared_normalized_exact",
-        )
-
-    # ----------------------------------------------------------------------
-    # Fail closed.
-    # ----------------------------------------------------------------------
+        matches.append(row)
+        excel_names.append(value)
+    if not matches:
+        return StoreMenuRow(0, store_name, MenuTargetStatus.STORE_NOT_FOUND, "STORE_SALES_ROW_NOT_FOUND", normalized)
+    if len(matches) > 1:
+        return StoreMenuRow(0, store_name, MenuTargetStatus.STORE_DUPLICATE, "STORE_SALES_ROW_DUPLICATED", normalized)
     return StoreMenuRow(
-        row_index=0,
-        store_name=store_name,
-        status=MenuTargetStatus.STORE_NOT_FOUND,
-        reason="STORE_SALES_ROW_NOT_FOUND",
-        normalized_store_name=normalized_source,
-        excel_store_name=None,
-        match_source=None,
+        matches[0],
+        store_name,
+        MenuTargetStatus.TARGET_RESOLVED,
+        "STORE_SALES_ROW_MATCHED",
+        normalized,
+        excel_names[0],
+        "daily_shared_normalized_exact",
     )
+
 
 def formula_protected_columns(worksheet, row_index: int, columns: Iterable[int]) -> tuple[str, ...]:
     protected: list[str] = []
@@ -419,4 +324,3 @@ def _header_text(value) -> str | None:
         return None
     normalized = " ".join(str(value).replace("\u00a0", " ").split())
     return re.sub(r"\s+\(", "(", normalized)
-

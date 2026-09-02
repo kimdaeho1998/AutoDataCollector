@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
+import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 
@@ -11,10 +12,38 @@ class StoreMatchStatus(str, Enum):
     AMBIGUOUS = "AMBIGUOUS"
 
 
-def normalize_store_name(name: str, brand_prefix: str | None = None) -> str:
-    brand_prefix = brand_prefix if brand_prefix is not None else os.environ.get("COLLECTOR_BRAND_PREFIX", "")
-    value = " ".join(name.split())
-    return value[len(brand_prefix):].strip() if value.startswith(brand_prefix) else value
+def _normalize_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value or "")
+    return " ".join(normalized.split()).strip()
+
+
+def _configured_brand_prefix(explicit: str | None = None) -> str:
+    if explicit is not None:
+        return _normalize_text(explicit)
+
+    configured = (
+        os.environ.get("COLLECTOR_BRAND_PREFIX", "").strip()
+        or os.environ.get("COLLECTOR_BRAND_NAME", "").strip()
+    )
+
+    return _normalize_text(configured)
+
+
+def normalize_store_name(
+    name: str,
+    brand_prefix: str | None = None,
+) -> str:
+    value = _normalize_text(name)
+    prefix = _configured_brand_prefix(brand_prefix)
+
+    if prefix and value.startswith(prefix):
+        remainder = value[len(prefix):].strip()
+
+        # Do not normalize the brand itself to an empty key.
+        if remainder:
+            return remainder
+
+    return value
 
 
 @dataclass(frozen=True)
