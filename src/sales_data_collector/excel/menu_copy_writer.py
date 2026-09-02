@@ -65,7 +65,10 @@ class MenuMonthlyCopyWriter:
             written = 0
             same = 0
             for cell in plan.cells:
-                if cell.status == CellPlanStatus.READY:
+                if cell.status in {
+                    CellPlanStatus.READY,
+                    CellPlanStatus.ZERO_PLACEHOLDER,
+                }:
                     worksheet[cell.target_cell].value = cell.proposed_value
                     written += 1
                 elif cell.status == CellPlanStatus.SAME_VALUE:
@@ -120,7 +123,11 @@ class MenuMonthlyCopyWriter:
         blocked = [
             cell
             for cell in plan.cells
-            if cell.status not in {CellPlanStatus.READY, CellPlanStatus.SAME_VALUE}
+            if cell.status not in {
+                CellPlanStatus.READY,
+                CellPlanStatus.ZERO_PLACEHOLDER,
+                CellPlanStatus.SAME_VALUE,
+            }
         ]
         if blocked:
             statuses = ",".join(f"{cell.target_cell}:{cell.status.value}" for cell in blocked)

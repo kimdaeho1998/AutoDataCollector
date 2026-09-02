@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 from dataclasses import dataclass
@@ -21,6 +21,7 @@ from .menu_template_resolver import (
 
 class CellPlanStatus(str, Enum):
     READY = "READY"
+    ZERO_PLACEHOLDER = "ZERO_PLACEHOLDER"
     SAME_VALUE = "SAME_VALUE"
     CONFLICT = "CONFLICT"
     FORMULA_PROTECTED = "FORMULA_PROTECTED"
@@ -179,7 +180,7 @@ def _direct_cell_plan(mapping_preview: MenuMappingPreview, worksheet, profile: M
             continue
         current_value = worksheet[f"{resolved.column_letter}{row_index}"].value
         current_formula = current_value if isinstance(current_value, str) and current_value.startswith("=") else None
-        status, reason = _cell_status(current_value, aggregate.sales_amount)
+        status, reason = _direct_menu_cell_status(current_value, aggregate.sales_amount)
         yield MenuExcelDryRunCell(
             store_name=store_name,
             store_row=row_index,
@@ -231,6 +232,32 @@ def _ab_validation(worksheet, store_name: str, row_index: int) -> MenuExcelAbVal
         status=CellPlanStatus.VALIDATE_ONLY if formula_valid else CellPlanStatus.BLOCKED,
         formula_valid=formula_valid,
         reason="AB_FORMULA_VALID" if formula_valid else "AB_FORMULA_MISSING_OR_UNEXPECTED",
+    )
+
+
+
+def _direct_menu_cell_status(
+    current_value,
+    proposed_value: int,
+) -> tuple[CellPlanStatus, str]:
+    """Writable zero-placeholder policy for direct G:AA menu cells only."""
+
+    if (
+        not (
+            isinstance(current_value, str)
+            and current_value.startswith("=")
+        )
+        and _numeric_value(current_value) == 0
+        and proposed_value > 0
+    ):
+        return (
+            CellPlanStatus.ZERO_PLACEHOLDER,
+            "CURRENT_ZERO_PLACEHOLDER",
+        )
+
+    return _cell_status(
+        current_value,
+        proposed_value,
     )
 
 
