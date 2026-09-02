@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import calendar
@@ -353,6 +353,36 @@ def run_menu_excel_dry_run(args: argparse.Namespace) -> int:
         plan = build_menu_excel_dry_run_plan(mapping_preview, worksheet, profile, store.store_name)
         breakdown = summarize_other_residual_by_reason(plan)
 
+        quantity_sales_row = plan.row
+        quantity_row = (
+            plan.row + 1
+            if isinstance(plan.row, int)
+            else 0
+        )
+        quantity_ratio_row = (
+            plan.row + 2
+            if isinstance(plan.row, int)
+            else 0
+        )
+
+        quantity_source_total = plan.source_total_quantity
+        quantity_direct_total = plan.direct_target_quantity
+        quantity_other_total = plan.other_residual_quantity
+        quantity_option_total = plan.option_quantity
+
+        quantity_business_reconciliation = (
+            quantity_direct_total
+            + quantity_other_total
+            == plan.business_menu_count
+        )
+
+        quantity_source_reconciliation = (
+            quantity_direct_total
+            + quantity_other_total
+            + quantity_option_total
+            == quantity_source_total
+        )
+
         print("=" * 120)
         print("MENU EXCEL DRY-RUN")
         print("=" * 120)
@@ -379,6 +409,79 @@ def run_menu_excel_dry_run(args: argparse.Namespace) -> int:
         print(f"AB_FORMULA_VALID={'YES' if plan.ab_validation.formula_valid else 'NO'}")
         print(f"AB_WRITE_PLAN_COUNT={plan.ab_write_plan_count}")
         print(f"AD_WRITE_PLAN_COUNT={plan.ad_write_plan_count}")
+        print("-" * 120)
+        print("QUANTITY ROW PLAN")
+        print("-" * 120)
+
+        print(f"SALES_ROW={quantity_sales_row}")
+        print(f"QUANTITY_ROW={quantity_row}")
+        print(
+            f"RATIO_ROW_AFTER_INSERT="
+            f"{quantity_ratio_row}"
+        )
+        print(
+            f"QUANTITY_LABEL_CELL=F{quantity_row}"
+        )
+        print("QUANTITY_LABEL=??")
+
+        for cell in plan.cells:
+            print(
+                f"COLUMN={cell.column} "
+                f"CANONICAL={cell.canonical_code} "
+                f"CELL={cell.column}{quantity_row} "
+                f"QUANTITY={cell.quantity:,}"
+            )
+
+        print(
+            f"OTHER_QUANTITY_CELL=AB{quantity_row}"
+        )
+        print(
+            f"OTHER_QUANTITY_FORMULA="
+            f"=AC{quantity_row}"
+            f"-SUM(G{quantity_row}:AA{quantity_row})"
+        )
+        print(
+            f"TOTAL_QUANTITY_CELL=AC{quantity_row}"
+        )
+        print(
+            f"TOTAL_QUANTITY="
+            f"{quantity_source_total:,}"
+        )
+        print(
+            f"DIRECT_QUANTITY="
+            f"{quantity_direct_total:,}"
+        )
+        print(
+            f"OTHER_QUANTITY="
+            f"{quantity_other_total:,}"
+        )
+        print(
+            f"OPTION_QUANTITY_FOR_RECONCILIATION="
+            f"{quantity_option_total:,}"
+        )
+
+        print(
+            "BUSINESS_QUANTITY_RECONCILIATION="
+            + (
+                "YES"
+                if quantity_business_reconciliation
+                else "NO"
+            )
+        )
+
+        print(
+            "SOURCE_QUANTITY_RECONCILIATION="
+            + (
+                "YES"
+                if quantity_source_reconciliation
+                else "NO"
+            )
+        )
+
+        print("QUANTITY_ROW_INSERT_PLANNED=YES")
+        print("QUANTITY_ROW_WRITE_EXECUTED=NO")
+        print("EXCEL_WRITE_EXECUTED=NO")
+
         print("-" * 120)
         print("CELL PLAN")
         print("-" * 120)
