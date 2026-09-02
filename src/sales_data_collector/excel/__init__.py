@@ -1,0 +1,2 @@
+"""Excel template inspection helpers."""
+
