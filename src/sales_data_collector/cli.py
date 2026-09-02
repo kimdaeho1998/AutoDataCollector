@@ -12,6 +12,8 @@ from openpyxl import load_workbook
 
 from .client import ServiceClient
 from .collector import collect_sales, export_sales
+from .excel.menu_excel_dry_run import CellPlanStatus, build_menu_excel_dry_run_plan, summarize_other_residual_by_reason
+from .excel.menu_template_profile import DAEGU_JULY_PROFILE, DAEJEON_JULY_PROFILE, MenuTemplateProfile
 from .exceptions import AuthenticationError, ServiceError
 from .models import CollectionMode, ExportFormat, SalesAdminDailyRecord, Store
 from .production import SalesAdminDryRun, SingleDaySalesCollector, default_target_date
@@ -47,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--production-write", action="store_true", help="Copy a workbook and write confirmed production updates.")
     parser.add_argument("--menu-monthly-preview", action="store_true", help="Preview one store's monthly menu sales without writing.")
     parser.add_argument("--menu-mapping-preview", action="store_true", help="Preview raw menu normalization and mapping without writing.")
+    parser.add_argument("--menu-excel-dry-run", action="store_true", help="Plan monthly menu Excel updates without writing or saving.")
     parser.add_argument("--year", type=int, help="Collection year for monthly preview modes.")
     parser.add_argument("--month", type=int, help="Collection month for monthly preview modes.")
     parser.add_argument("--date", action="append", default=[], help="YYYY-MM-DD. Repeat for multi-date production dry-run; defaults to yesterday.")
@@ -90,6 +93,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error("--production-dry-run and --production-write cannot be used together")
         if args.menu_mapping_preview and not args.menu_monthly_preview:
             args.menu_monthly_preview = True
+        if args.menu_excel_dry_run:
+            return run_menu_excel_dry_run(args)
         if args.menu_monthly_preview:
             return run_menu_monthly_preview(args)
         if args.production_dry_run or args.production_write:
@@ -295,6 +300,85 @@ def print_menu_mapping_preview(result) -> None:
     print("=" * 120)
 
 
+def run_menu_excel_dry_run(args: argparse.Namespace) -> int:
+    if not args.template:
+        raise ValueError("--template is required for --menu-excel-dry-run")
+    if not args.year or not args.month:
+        raise ValueError("--year and --month are required for --menu-excel-dry-run")
+    if args.month < 1 or args.month > 12:
+        raise ValueError("--month must be between 1 and 12")
+    if args.all_stores or args.store_idx:
+        raise ValueError("--menu-excel-dry-run supports one --store-name only in STEP M-04")
+    if len(args.store_name) != 1:
+        raise ValueError("--menu-excel-dry-run requires exactly one --store-name")
+
+    workbook = load_workbook(args.template, data_only=False)
+    profile = infer_menu_template_profile(workbook)
+    worksheet = workbook[profile.sheet_name]
+    period_start = date(args.year, args.month, 1)
+    period_end = date(args.year, args.month, calendar.monthrange(args.year, args.month)[1])
+    client = ServiceClient(args.base_url)
+    try:
+        print(f"[INFO] Menu Excel dry-run target: {period_start.isoformat()} ~ {period_end.isoformat()}")
+        available_stores = login_and_get_stores(client, args)
+        stores = resolve_stores(available_stores, all_stores=False, store_ids=(), store_names=args.store_name)
+        if not stores:
+            raise ValueError("STORE_NOT_FOUND")
+        if len(stores) > 1:
+            raise ValueError("AMBIGUOUS_STORE_NAME")
+        store = stores[0]
+        source = client.get_menu_monthly_sales(
+            start_date=period_start,
+            end_date=period_end,
+            brand_idx=args.brand_idx,
+            brand_name=args.brand_name,
+            store_idx=store.magic_store_id,
+            store_name=store.store_name,
+        )
+        mapping_preview = build_menu_mapping_preview(source)
+        plan = build_menu_excel_dry_run_plan(mapping_preview, worksheet, profile, store.store_name)
+        breakdown = summarize_other_residual_by_reason(plan)
+
+        print("=" * 120)
+        print("MENU EXCEL DRY-RUN")
+        print("=" * 120)
+        print(f"PROFILE={profile.name}")
+        print(f"SHEET={profile.sheet_name}")
+        print(f"STORE={store.store_name}")
+        print(f"ROW={plan.store_row or 'STORE_NOT_FOUND'}")
+        print(f"PERIOD={period_start:%Y-%m}")
+        print(f"SOURCE_TOTAL={_money(plan.source_total_sales)}")
+        print(f"CURRENT_AC={plan.ac_plan.current_value!r}")
+        print(f"PROPOSED_AC={_money(plan.ac_plan.proposed_value)}")
+        print(f"AC_STATUS={plan.ac_plan.status.value}")
+        print(f"DIRECT_TARGET_TOTAL={_money(plan.direct_target_sales)}")
+        print(f"SOURCE_OTHER_RESIDUAL={_money(plan.source_other_residual)}")
+        print(f"PROPOSED_OTHER_RESIDUAL={_money(plan.calculated_other_residual)}")
+        print(f"RESIDUAL_MATCH={'YES' if plan.residual_match else 'NO'}")
+        print(f"AB_FORMULA={plan.ab_validation.current_formula}")
+        print(f"AB_FORMULA_VALID={'YES' if plan.ab_validation.formula_valid else 'NO'}")
+        print(f"AB_WRITE_PLAN_COUNT={plan.ab_write_plan_count}")
+        print(f"AD_WRITE_PLAN_COUNT={plan.ad_write_plan_count}")
+        print("-" * 120)
+        print("CELL PLAN")
+        print("-" * 120)
+        for cell in plan.cells:
+            print(
+                f"COLUMN={cell.target_column} HEADER={cell.excel_group}/{cell.excel_header} "
+                f"CANONICAL={cell.canonical_code} CELL={cell.target_cell} "
+                f"CURRENT={cell.current_value!r} PROPOSED={_money(cell.proposed_value)} STATUS={cell.status.value}"
+            )
+        print("-" * 120)
+        print("OTHER RESIDUAL BREAKDOWN")
+        print("-" * 120)
+        for key, value in breakdown.items():
+            print(f"{key}={_money(value)}")
+        print("=" * 120)
+        return 0 if _menu_dry_run_is_pass(plan) else 1
+    finally:
+        client.logout()
+
+
 def run_store_batch_production(args: argparse.Namespace, *, write: bool) -> int:
     business_dates = [parse_ymd(value) for value in args.date] or [default_target_date()]
     template = Path(args.template)
@@ -412,6 +496,29 @@ def resolve_stores(
         elif name_set and normalize_store_name(store.store_name) in name_set:
             selected.append(store)
     return selected
+
+
+def infer_menu_template_profile(workbook) -> MenuTemplateProfile:
+    if DAEJEON_JULY_PROFILE.sheet_name in workbook.sheetnames:
+        return DAEJEON_JULY_PROFILE
+    if DAEGU_JULY_PROFILE.sheet_name in workbook.sheetnames:
+        return DAEGU_JULY_PROFILE
+    raise ValueError("MENU_TEMPLATE_PROFILE_NOT_FOUND")
+
+
+def _menu_dry_run_is_pass(plan) -> bool:
+    if not plan.residual_match:
+        return False
+    if not plan.ab_validation.formula_valid:
+        return False
+    if plan.ac_plan.status not in {CellPlanStatus.READY, CellPlanStatus.SAME_VALUE}:
+        return False
+    allowed = {CellPlanStatus.READY, CellPlanStatus.SAME_VALUE}
+    return all(cell.status in allowed for cell in plan.cells)
+
+
+def _money(value: int | None) -> str:
+    return "NOT_AVAILABLE" if value is None else f"{value:,}"
 
 
 if __name__ == "__main__":

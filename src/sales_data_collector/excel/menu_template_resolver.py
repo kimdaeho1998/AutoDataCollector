@@ -21,6 +21,14 @@ class MenuTargetStatus(str, Enum):
     FORMULA_PROTECTED = "FORMULA_PROTECTED"
     STORE_NOT_FOUND = "STORE_NOT_FOUND"
     STORE_DUPLICATE = "STORE_DUPLICATE"
+    RECONCILIATION_ERROR = "RECONCILIATION_ERROR"
+
+
+class ExcelDisposition(str, Enum):
+    DIRECT_TARGET = "DIRECT_TARGET"
+    OTHER_RESIDUAL = "OTHER_RESIDUAL"
+    OPTION_NOT_APPLICABLE = "OPTION_NOT_APPLICABLE"
+    OPTION_REVIEW_REQUIRED = "OPTION_REVIEW_REQUIRED"
 
 
 @dataclass(frozen=True)
@@ -52,6 +60,7 @@ class StoreMenuRow:
 class MenuExcelTargetItem:
     mapping: MenuMappingResult
     status: MenuTargetStatus
+    disposition: ExcelDisposition
     column_letter: str | None
     reason: str
 
@@ -69,11 +78,44 @@ class MenuExcelTargetPreview:
     def no_direct_target_sales(self) -> int:
         return sum(item.mapping.record.sales_amount for item in self.items if item.status != MenuTargetStatus.TARGET_RESOLVED)
 
+    @property
+    def other_residual_sales(self) -> int:
+        return sum(item.mapping.record.sales_amount for item in self.items if item.disposition == ExcelDisposition.OTHER_RESIDUAL)
+
+    @property
+    def option_sales(self) -> int:
+        return sum(
+            item.mapping.record.sales_amount
+            for item in self.items
+            if item.disposition in (ExcelDisposition.OPTION_NOT_APPLICABLE, ExcelDisposition.OPTION_REVIEW_REQUIRED)
+        )
+
     def count_by_status(self, status: MenuTargetStatus) -> int:
         return sum(1 for item in self.items if item.status == status)
 
     def sales_by_status(self, status: MenuTargetStatus) -> int:
         return sum(item.mapping.record.sales_amount for item in self.items if item.status == status)
+
+    def count_by_disposition(self, disposition: ExcelDisposition) -> int:
+        return sum(1 for item in self.items if item.disposition == disposition)
+
+    def sales_by_disposition(self, disposition: ExcelDisposition) -> int:
+        return sum(item.mapping.record.sales_amount for item in self.items if item.disposition == disposition)
+
+
+@dataclass(frozen=True)
+class ResidualReconciliation:
+    source_total_sales: int
+    direct_target_sales: int
+    other_residual_sales: int
+    option_sales: int
+    expected_other_residual: int
+    status: MenuTargetStatus
+    reason: str
+
+    @property
+    def is_pass(self) -> bool:
+        return self.status == MenuTargetStatus.TARGET_RESOLVED
 
 
 MENU_TARGETS: dict[str, ExcelMenuTarget] = {
@@ -83,7 +125,9 @@ MENU_TARGETS: dict[str, ExcelMenuTarget] = {
     "KIMBAP_WASABI_CRAB_MAYO": ExcelMenuTarget("KIMBAP_WASABI_CRAB_MAYO", "김밥", "와사비크래마요(4줄)"),
     "KIMBAP_SPICY_JINMI": ExcelMenuTarget("KIMBAP_SPICY_JINMI", "김밥", "매콤진미꼬마김밥(4줄)"),
     "KIMBAP_TOFU_SKIN": ExcelMenuTarget("KIMBAP_TOFU_SKIN", "김밥", "유부 꼬마김밥(4줄)"),
+    "KIMBAP_YUBU": ExcelMenuTarget("KIMBAP_YUBU", "김밥", "유부 꼬마김밥(4줄)"),
     "KIMBAP_SPICY_FISH_CAKE": ExcelMenuTarget("KIMBAP_SPICY_FISH_CAKE", "김밥", "불어묵꼬마김밥(4줄)"),
+    "KIMBAP_BUL_EOMUK": ExcelMenuTarget("KIMBAP_BUL_EOMUK", "김밥", "불어묵꼬마김밥(4줄)"),
     "FISH_CAKE_SOUP": ExcelMenuTarget("FISH_CAKE_SOUP", "어묵탕", "어묵탕"),
     "TTEOKBOKKI_MILD": ExcelMenuTarget("TTEOKBOKKI_MILD", "국물떡볶이", "떡볶이(순)"),
     "TTEOKBOKKI_SPICY": ExcelMenuTarget("TTEOKBOKKI_SPICY", "국물떡볶이", "떡볶이(매)"),
@@ -96,6 +140,7 @@ MENU_TARGETS: dict[str, ExcelMenuTarget] = {
     "SAUCE_SRIRACHA_MAYO": ExcelMenuTarget("SAUCE_SRIRACHA_MAYO", "소스", "스리라차"),
     "SAUCE_CHEONGYANG": ExcelMenuTarget("SAUCE_CHEONGYANG", "소스", "청양고추"),
     "SAUCE_MAKHANI_CURRY": ExcelMenuTarget("SAUCE_MAKHANI_CURRY", "소스", "마크니커리"),
+    "SAUCE_MARKNI_CURRY": ExcelMenuTarget("SAUCE_MARKNI_CURRY", "소스", "마크니커리"),
     "SAUCE_CHEESE": ExcelMenuTarget("SAUCE_CHEESE", "소스", "치즈"),
     "SIKHYE": ExcelMenuTarget("SIKHYE", "음료", "식혜"),
 }
@@ -174,9 +219,53 @@ def build_menu_excel_target_preview(mapping_preview: MenuMappingPreview, workshe
     items: list[MenuExcelTargetItem] = []
     cache: dict[str, ResolvedMenuTarget] = {}
     for mapping in mapping_preview.mappings:
-        status, column_letter, reason = _status_for_mapping(mapping, worksheet, profile, cache)
-        items.append(MenuExcelTargetItem(mapping=mapping, status=status, column_letter=column_letter, reason=reason))
+        status, disposition, column_letter, reason = _status_for_mapping(mapping, worksheet, profile, cache)
+        items.append(
+            MenuExcelTargetItem(
+                mapping=mapping,
+                status=status,
+                disposition=disposition,
+                column_letter=column_letter,
+                reason=reason,
+            )
+        )
     return MenuExcelTargetPreview(source=mapping_preview, items=tuple(items))
+
+
+def reconcile_other_residual(preview: MenuExcelTargetPreview, source_total_sales: int | None = None) -> ResidualReconciliation:
+    total = source_total_sales if source_total_sales is not None else preview.source.source.source_total_sales
+    if total is None:
+        return ResidualReconciliation(0, preview.direct_target_sales, preview.other_residual_sales, preview.option_sales, 0, MenuTargetStatus.RECONCILIATION_ERROR, "SOURCE_TOTAL_MISSING")
+    expected_other_residual = total - preview.direct_target_sales - preview.option_sales
+    if expected_other_residual < 0:
+        return ResidualReconciliation(
+            source_total_sales=total,
+            direct_target_sales=preview.direct_target_sales,
+            other_residual_sales=preview.other_residual_sales,
+            option_sales=preview.option_sales,
+            expected_other_residual=expected_other_residual,
+            status=MenuTargetStatus.RECONCILIATION_ERROR,
+            reason="DIRECT_TARGET_EXCEEDS_SOURCE_TOTAL",
+        )
+    if expected_other_residual != preview.other_residual_sales:
+        return ResidualReconciliation(
+            source_total_sales=total,
+            direct_target_sales=preview.direct_target_sales,
+            other_residual_sales=preview.other_residual_sales,
+            option_sales=preview.option_sales,
+            expected_other_residual=expected_other_residual,
+            status=MenuTargetStatus.RECONCILIATION_ERROR,
+            reason="OTHER_RESIDUAL_MISMATCH",
+        )
+    return ResidualReconciliation(
+        source_total_sales=total,
+        direct_target_sales=preview.direct_target_sales,
+        other_residual_sales=preview.other_residual_sales,
+        option_sales=preview.option_sales,
+        expected_other_residual=expected_other_residual,
+        status=MenuTargetStatus.TARGET_RESOLVED,
+        reason="SOURCE_TOTAL_RECONCILED",
+    )
 
 
 def _status_for_mapping(
@@ -184,21 +273,24 @@ def _status_for_mapping(
     worksheet,
     profile: MenuTemplateProfile,
     cache: dict[str, ResolvedMenuTarget],
-) -> tuple[MenuTargetStatus, str | None, str]:
+) -> tuple[MenuTargetStatus, ExcelDisposition, str | None, str]:
     if mapping.row_type == MenuRowType.OPTION:
-        return MenuTargetStatus.OPTION_NOT_APPLICABLE, None, "OPTION_ROW"
+        if mapping.record.sales_amount:
+            return MenuTargetStatus.OPTION_NOT_APPLICABLE, ExcelDisposition.OPTION_REVIEW_REQUIRED, None, "NON_ZERO_OPTION_ROW"
+        return MenuTargetStatus.OPTION_NOT_APPLICABLE, ExcelDisposition.OPTION_NOT_APPLICABLE, None, "OPTION_ROW"
     if mapping.status == MenuMappingStatus.AMBIGUOUS:
-        return MenuTargetStatus.AMBIGUOUS_SOURCE, None, mapping.reason
+        return MenuTargetStatus.AMBIGUOUS_SOURCE, ExcelDisposition.OTHER_RESIDUAL, None, mapping.reason
     if mapping.status == MenuMappingStatus.UNMAPPED:
-        return MenuTargetStatus.NO_DIRECT_TARGET, None, mapping.reason
+        return MenuTargetStatus.NO_DIRECT_TARGET, ExcelDisposition.OTHER_RESIDUAL, None, mapping.reason
     if mapping.status != MenuMappingStatus.MAPPED or not mapping.canonical_code:
-        return MenuTargetStatus.NO_DIRECT_TARGET, None, mapping.reason
+        return MenuTargetStatus.NO_DIRECT_TARGET, ExcelDisposition.OTHER_RESIDUAL, None, mapping.reason
 
     resolved = cache.get(mapping.canonical_code)
     if resolved is None:
         resolved = resolve_menu_target(worksheet, profile, mapping.canonical_code)
         cache[mapping.canonical_code] = resolved
-    return resolved.status, resolved.column_letter, resolved.reason
+    disposition = ExcelDisposition.DIRECT_TARGET if resolved.status == MenuTargetStatus.TARGET_RESOLVED else ExcelDisposition.OTHER_RESIDUAL
+    return resolved.status, disposition, resolved.column_letter, resolved.reason
 
 
 def _effective_cell_value(worksheet, row: int, column: int):
