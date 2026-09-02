@@ -17,6 +17,7 @@ from .models import CollectionMode, ExportFormat, SalesAdminDailyRecord, Store
 from .production import SalesAdminDryRun, SingleDaySalesCollector, default_target_date
 from .mapping.template_resolver import SalesAdminTemplateResolver
 from .mapping.store_normalizer import normalize_store_name
+from .mapping.menu_mapping import MenuMappingStatus, build_menu_mapping_preview
 from .writers.single_day_writer import SalesAdminSingleDayWriter
 from .utils import date_range, parse_ymd
 
@@ -45,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--production-dry-run", action="store_true", help="Preview one production workbook update without writing.")
     parser.add_argument("--production-write", action="store_true", help="Copy a workbook and write confirmed production updates.")
     parser.add_argument("--menu-monthly-preview", action="store_true", help="Preview one store's monthly menu sales without writing.")
+    parser.add_argument("--menu-mapping-preview", action="store_true", help="Preview raw menu normalization and mapping without writing.")
     parser.add_argument("--year", type=int, help="Collection year for monthly preview modes.")
     parser.add_argument("--month", type=int, help="Collection month for monthly preview modes.")
     parser.add_argument("--date", action="append", default=[], help="YYYY-MM-DD. Repeat for multi-date production dry-run; defaults to yesterday.")
@@ -86,6 +88,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.production_dry_run and args.production_write:
             parser.error("--production-dry-run and --production-write cannot be used together")
+        if args.menu_mapping_preview and not args.menu_monthly_preview:
+            args.menu_monthly_preview = True
         if args.menu_monthly_preview:
             return run_menu_monthly_preview(args)
         if args.production_dry_run or args.production_write:
@@ -233,9 +237,62 @@ def run_menu_monthly_preview(args: argparse.Namespace) -> int:
         print(f"SOURCE_TOTAL={'NOT_AVAILABLE' if result.source_total_sales is None else f'{result.source_total_sales:,}'}")
         print(f"TOTAL_MATCH={total_match}")
         print("=" * 120)
+        if args.menu_mapping_preview:
+            print_menu_mapping_preview(result)
         return 0
     finally:
         client.logout()
+
+
+def print_menu_mapping_preview(result) -> None:
+    preview = build_menu_mapping_preview(result)
+    mapped_sales = preview.sales_by_status(MenuMappingStatus.MAPPED)
+    ambiguous_sales = preview.sales_by_status(MenuMappingStatus.AMBIGUOUS)
+    unmapped_sales = preview.sales_by_status(MenuMappingStatus.UNMAPPED)
+    option_sales = preview.sales_by_status(MenuMappingStatus.NOT_APPLICABLE)
+    coverage = (mapped_sales / preview.total_classified_sales * 100) if preview.total_classified_sales else 0
+
+    print("=" * 120)
+    print("MENU MAPPING PREVIEW")
+    print("=" * 120)
+    print(f"STORE={result.store_name}")
+    print(f"PERIOD={result.period_start:%Y-%m}")
+    print(f"RAW_ROW_COUNT={preview.raw_row_count}")
+    print(f"MENU_ROW_COUNT={preview.menu_row_count}")
+    print(f"OPTION_ROW_COUNT={preview.option_row_count}")
+    print(f"MAPPED_COUNT={preview.count_by_status(MenuMappingStatus.MAPPED)}")
+    print(f"AMBIGUOUS_COUNT={preview.count_by_status(MenuMappingStatus.AMBIGUOUS)}")
+    print(f"UNMAPPED_COUNT={preview.count_by_status(MenuMappingStatus.UNMAPPED)}")
+    print(f"OPTION_COUNT={preview.count_by_status(MenuMappingStatus.NOT_APPLICABLE)}")
+    print(f"MAPPED_SALES={mapped_sales:,}")
+    print(f"AMBIGUOUS_SALES={ambiguous_sales:,}")
+    print(f"UNMAPPED_SALES={unmapped_sales:,}")
+    print(f"OPTION_SALES={option_sales:,}")
+    print(f"TOTAL_CLASSIFIED_SALES={preview.total_classified_sales:,}")
+    print(f"SOURCE_TOTAL_SALES={'NOT_AVAILABLE' if result.source_total_sales is None else f'{result.source_total_sales:,}'}")
+    print(f"MAPPING_SALES_COVERAGE={coverage:.2f}%")
+    print("-" * 120)
+    print("CANONICAL AGGREGATION")
+    print("-" * 120)
+    for idx, aggregate in enumerate(preview.aggregates, 1):
+        print(f"{idx:02d} | {aggregate.canonical_code} | ALIASES={', '.join(aggregate.aliases)} | QTY={aggregate.quantity:,} | SALES={aggregate.sales_amount:,}")
+    print("-" * 120)
+    print("RAW MENU MAPPING INVENTORY")
+    print("-" * 120)
+    for idx, item in enumerate(preview.mappings, 1):
+        canonical = item.canonical_code or "NONE"
+        qty = "N/A" if item.record.sales_quantity is None else f"{item.record.sales_quantity:,}"
+        print(f"{idx:02d}.")
+        print(f"RAW={item.record.menu_name}")
+        print(f"NORMALIZED={item.normalized_name}")
+        print("GROUP=UNKNOWN")
+        print(f"ROW_TYPE={item.row_type.value}")
+        print(f"QTY={qty}")
+        print(f"SALES={item.record.sales_amount:,}")
+        print(f"CANONICAL={canonical}")
+        print(f"STATUS={item.status.value}")
+        print(f"REASON={item.reason}")
+    print("=" * 120)
 
 
 def run_store_batch_production(args: argparse.Namespace, *, write: bool) -> int:
