@@ -8,6 +8,7 @@ from typing import Iterable
 from openpyxl.utils import get_column_letter
 
 from ..mapping.menu_mapping import MenuMappingPreview, MenuMappingResult, MenuMappingStatus, MenuRowType
+from ..mapping.store_normalizer import normalize_store_name
 from .menu_template_profile import MenuTemplateProfile
 
 
@@ -54,6 +55,9 @@ class StoreMenuRow:
     store_name: str
     status: MenuTargetStatus
     reason: str = ""
+    normalized_store_name: str | None = None
+    excel_store_name: str | None = None
+    match_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -190,20 +194,32 @@ def resolve_menu_target(worksheet, profile: MenuTemplateProfile, canonical_code:
 
 
 def resolve_store_sales_row(worksheet, profile: MenuTemplateProfile, store_name: str) -> StoreMenuRow:
+    normalized = normalize_store_name(store_name)
     matches: list[int] = []
+    excel_names: list[str] = []
     for row in range(1, worksheet.max_row + 1):
-        if worksheet.cell(row=row, column=profile.store_column).value != store_name:
+        value = worksheet.cell(row=row, column=profile.store_column).value
+        if not isinstance(value, str) or normalize_store_name(value) != normalized:
             continue
         if worksheet.cell(row=row, column=profile.sales_marker_column).value != "매출":
             continue
         if worksheet.cell(row=row + 1, column=profile.sales_marker_column).value != "비율":
             continue
         matches.append(row)
+        excel_names.append(value)
     if not matches:
-        return StoreMenuRow(0, store_name, MenuTargetStatus.STORE_NOT_FOUND, "STORE_SALES_ROW_NOT_FOUND")
+        return StoreMenuRow(0, store_name, MenuTargetStatus.STORE_NOT_FOUND, "STORE_SALES_ROW_NOT_FOUND", normalized)
     if len(matches) > 1:
-        return StoreMenuRow(0, store_name, MenuTargetStatus.STORE_DUPLICATE, "STORE_SALES_ROW_DUPLICATED")
-    return StoreMenuRow(matches[0], store_name, MenuTargetStatus.TARGET_RESOLVED, "STORE_SALES_ROW_MATCHED")
+        return StoreMenuRow(0, store_name, MenuTargetStatus.STORE_DUPLICATE, "STORE_SALES_ROW_DUPLICATED", normalized)
+    return StoreMenuRow(
+        matches[0],
+        store_name,
+        MenuTargetStatus.TARGET_RESOLVED,
+        "STORE_SALES_ROW_MATCHED",
+        normalized,
+        excel_names[0],
+        "daily_shared_normalized_exact",
+    )
 
 
 def formula_protected_columns(worksheet, row_index: int, columns: Iterable[int]) -> tuple[str, ...]:

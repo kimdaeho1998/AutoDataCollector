@@ -78,6 +78,9 @@ class MenuExcelAbValidation:
 class MenuExcelDryRunPlan:
     store_name: str
     store_row: int
+    normalized_store_name: str | None
+    excel_store_name: str | None
+    store_match_source: str | None
     source: MenuMappingPreview
     disposition: MenuExcelTargetPreview
     cells: tuple[MenuExcelDryRunCell, ...]
@@ -120,6 +123,9 @@ def build_menu_excel_dry_run_plan(
         return MenuExcelDryRunPlan(
             store_name=store_name,
             store_row=store_row.row_index,
+            normalized_store_name=store_row.normalized_store_name,
+            excel_store_name=store_row.excel_store_name,
+            store_match_source=store_row.match_source,
             source=mapping_preview,
             disposition=disposition,
             cells=(),
@@ -145,6 +151,9 @@ def build_menu_excel_dry_run_plan(
     return MenuExcelDryRunPlan(
         store_name=store_name,
         store_row=store_row.row_index,
+        normalized_store_name=store_row.normalized_store_name,
+        excel_store_name=store_row.excel_store_name,
+        store_match_source=store_row.match_source,
         source=mapping_preview,
         disposition=disposition,
         cells=cells,
