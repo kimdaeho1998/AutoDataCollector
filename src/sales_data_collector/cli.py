@@ -835,7 +835,7 @@ def _menu_dry_run_is_pass(plan) -> bool:
         return False
     if plan.ac_plan.status not in {CellPlanStatus.READY, CellPlanStatus.SAME_VALUE}:
         return False
-    allowed = {CellPlanStatus.READY, CellPlanStatus.SAME_VALUE}
+    allowed = {CellPlanStatus.READY, CellPlanStatus.SAME_VALUE, CellPlanStatus.ZERO_PLACEHOLDER}
     return all(cell.status in allowed for cell in plan.cells)
 
 
