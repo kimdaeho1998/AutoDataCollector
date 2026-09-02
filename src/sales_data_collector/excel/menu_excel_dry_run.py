@@ -86,6 +86,11 @@ class MenuExcelDryRunPlan:
     source_total_sales: int | None
     direct_target_sales: int
     source_other_residual: int
+    direct_target_quantity: int
+    source_other_residual_quantity: int
+    option_quantity: int
+    raw_product_count: int
+    business_menu_count: int
     calculated_other_residual: int | None
     residual_match: bool
 
@@ -123,6 +128,11 @@ def build_menu_excel_dry_run_plan(
             source_total_sales=mapping_preview.source.source_total_sales,
             direct_target_sales=disposition.direct_target_sales,
             source_other_residual=disposition.other_residual_sales,
+            direct_target_quantity=_quantity_by_disposition(disposition, ExcelDisposition.DIRECT_TARGET),
+            source_other_residual_quantity=_quantity_by_disposition(disposition, ExcelDisposition.OTHER_RESIDUAL),
+            option_quantity=_option_quantity(disposition),
+            raw_product_count=_raw_product_count(disposition),
+            business_menu_count=_business_menu_count(disposition),
             calculated_other_residual=None,
             residual_match=False,
         )
@@ -143,6 +153,11 @@ def build_menu_excel_dry_run_plan(
         source_total_sales=mapping_preview.source.source_total_sales,
         direct_target_sales=disposition.direct_target_sales,
         source_other_residual=disposition.other_residual_sales,
+        direct_target_quantity=_quantity_by_disposition(disposition, ExcelDisposition.DIRECT_TARGET),
+        source_other_residual_quantity=_quantity_by_disposition(disposition, ExcelDisposition.OTHER_RESIDUAL),
+        option_quantity=_option_quantity(disposition),
+        raw_product_count=_raw_product_count(disposition),
+        business_menu_count=_business_menu_count(disposition),
         calculated_other_residual=calculated_other,
         residual_match=reconciliation.is_pass,
     )
@@ -276,3 +291,23 @@ def summarize_other_residual_by_reason(plan: MenuExcelDryRunPlan) -> dict[str, i
         else:
             buckets["OTHER_NEW_MENU"] += amount
     return buckets
+
+
+def _quantity_by_disposition(disposition: MenuExcelTargetPreview, target: ExcelDisposition) -> int:
+    return sum((item.mapping.record.sales_quantity or 0) for item in disposition.items if item.disposition == target)
+
+
+def _option_quantity(disposition: MenuExcelTargetPreview) -> int:
+    return sum(
+        item.mapping.record.sales_quantity or 0
+        for item in disposition.items
+        if item.disposition in (ExcelDisposition.OPTION_NOT_APPLICABLE, ExcelDisposition.OPTION_REVIEW_REQUIRED)
+    )
+
+
+def _raw_product_count(disposition: MenuExcelTargetPreview) -> int:
+    return sum(item.mapping.record.sales_quantity or 0 for item in disposition.items)
+
+
+def _business_menu_count(disposition: MenuExcelTargetPreview) -> int:
+    return _raw_product_count(disposition) - _option_quantity(disposition)

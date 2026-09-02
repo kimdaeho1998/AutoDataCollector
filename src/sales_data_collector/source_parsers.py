@@ -143,11 +143,13 @@ class MenuSalesParser:
         records = self._parse_detail_rows(soup, store_id, store_name, period_start, period_end)
         if not records:
             records = self._parse_tables(soup, store_id, store_name, period_start, period_end)
+        source_total_sales = self._source_total(soup)
+        source_total_quantity = self._source_total_quantity(soup)
         if not records and self._is_empty_result(soup):
-            return MenuMonthlySalesResult(store_id, store_name, period_start, period_end, [], self._source_total(soup))
+            return MenuMonthlySalesResult(store_id, store_name, period_start, period_end, [], source_total_sales, source_total_quantity)
         if not records:
             raise ParseError("menu sales response contains no parseable menu rows")
-        return MenuMonthlySalesResult(store_id, store_name, period_start, period_end, records, self._source_total(soup))
+        return MenuMonthlySalesResult(store_id, store_name, period_start, period_end, records, source_total_sales, source_total_quantity)
 
     def _parse_detail_rows(self, soup: BeautifulSoup, store_id: str, store_name: str, period_start: date, period_end: date) -> list[MenuSalesRecord]:
         records = self._parse_detail_title_children(soup, store_id, store_name, period_start, period_end)
@@ -164,6 +166,7 @@ class MenuSalesParser:
                 numbers = _numbers(_text(body))
                 if not numbers:
                     continue
+                unit_price = numbers[-3] if len(numbers) >= 3 else None
                 sales_amount = numbers[-1]
                 sales_quantity = numbers[-2] if len(numbers) >= 2 else None
                 records.append(
@@ -175,6 +178,7 @@ class MenuSalesParser:
                         menu_name=title,
                         sales_quantity=sales_quantity,
                         sales_amount=sales_amount,
+                        unit_price=unit_price,
                     )
                 )
             if records:
@@ -223,6 +227,7 @@ class MenuSalesParser:
             menu_name=menu_name,
             sales_quantity=clean_int(quantity_match.group(0)),
             sales_amount=clean_int(sales_match.group(0)),
+            unit_price=clean_int(unit_price_match.group(0)),
         )
 
     @staticmethod
@@ -261,7 +266,7 @@ class MenuSalesParser:
             indexes = self._resolve_indexes(headers)
             if indexes is None:
                 continue
-            menu_idx, quantity_idx, amount_idx = indexes
+            menu_idx, quantity_idx, unit_price_idx, amount_idx = indexes
             for row in rows[1:]:
                 cells = [self._cell_text(cell) for cell in row.find_all(["th", "td"])]
                 if not cells or max(menu_idx, amount_idx) >= len(cells):
@@ -273,6 +278,7 @@ class MenuSalesParser:
                     continue
                 sales_amount = clean_int(cells[amount_idx])
                 sales_quantity = clean_int(cells[quantity_idx]) if quantity_idx is not None and quantity_idx < len(cells) else None
+                unit_price = clean_int(cells[unit_price_idx]) if unit_price_idx is not None and unit_price_idx < len(cells) else None
                 records.append(
                     MenuSalesRecord(
                         store_id=store_id,
@@ -282,11 +288,12 @@ class MenuSalesParser:
                         menu_name=menu_name,
                         sales_quantity=sales_quantity,
                         sales_amount=sales_amount,
+                        unit_price=unit_price,
                     )
                 )
         return records
 
-    def _resolve_indexes(self, headers: list[str]) -> tuple[int, int | None, int] | None:
+    def _resolve_indexes(self, headers: list[str]) -> tuple[int, int | None, int | None, int] | None:
         normalized = [header.replace(" ", "") for header in headers]
         menu_idx = self._find_index(normalized, self.menu_keywords)
         amount_candidates = [
@@ -296,9 +303,10 @@ class MenuSalesParser:
         ]
         amount_idx = amount_candidates[-1] if amount_candidates else None
         quantity_idx = self._find_index(normalized, self.quantity_keywords)
+        unit_price_idx = self._find_index(normalized, ("단가", "판매가", "가격"))
         if menu_idx is None or amount_idx is None:
             return None
-        return menu_idx, quantity_idx, amount_idx
+        return menu_idx, quantity_idx, unit_price_idx, amount_idx
 
     @staticmethod
     def _find_index(headers: list[str], keywords: tuple[str, ...]) -> int | None:
@@ -328,6 +336,15 @@ class MenuSalesParser:
     @staticmethod
     def _source_total(soup: BeautifulSoup) -> int | None:
         for label in ("매출합계", "합계", "총매출", "총 매출"):
+            value = _summary_value(soup, label)
+            if value is not None:
+                return value
+        return None
+
+
+    @staticmethod
+    def _source_total_quantity(soup: BeautifulSoup) -> int | None:
+        for label in ("건수", "嫄댁닔"):
             value = _summary_value(soup, label)
             if value is not None:
                 return value

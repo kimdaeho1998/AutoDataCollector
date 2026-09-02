@@ -221,7 +221,9 @@ def run_menu_monthly_preview(args: argparse.Namespace) -> int:
             store_name=store.store_name,
         )
         parsed_sum = sum(record.sales_amount for record in result.records)
+        parsed_quantity_sum = sum(record.sales_quantity or 0 for record in result.records)
         total_match = "NOT_AVAILABLE" if result.source_total_sales is None else ("YES" if parsed_sum == result.source_total_sales else "NO")
+        quantity_match = "NOT_AVAILABLE" if result.source_total_quantity is None else ("YES" if parsed_quantity_sum == result.source_total_quantity else "NO")
         print("=" * 120)
         print("MENU MONTHLY PREVIEW")
         print("=" * 120)
@@ -235,9 +237,13 @@ def run_menu_monthly_preview(args: argparse.Namespace) -> int:
         print("-" * 120)
         for idx, record in enumerate(result.records, 1):
             qty = "N/A" if record.sales_quantity is None else f"{record.sales_quantity:,}"
-            print(f"{idx:02d} | {record.menu_name} | QTY={qty} | SALES={record.sales_amount:,}")
+            unit_price = "N/A" if record.unit_price is None else f"{record.unit_price:,}"
+            print(f"{idx:02d} | {record.menu_name} | UNIT={unit_price} | QTY={qty} | SALES={record.sales_amount:,}")
         print("-" * 120)
         print(f"MENU_ROW_COUNT={len(result.records)}")
+        print(f"PARSED_QUANTITY_SUM={parsed_quantity_sum:,}")
+        print(f"SOURCE_QUANTITY_TOTAL={'NOT_AVAILABLE' if result.source_total_quantity is None else f'{result.source_total_quantity:,}'}")
+        print(f"QUANTITY_MATCH={quantity_match}")
         print(f"PARSED_SALES_SUM={parsed_sum:,}")
         print(f"SOURCE_TOTAL={'NOT_AVAILABLE' if result.source_total_sales is None else f'{result.source_total_sales:,}'}")
         print(f"TOTAL_MATCH={total_match}")
@@ -348,11 +354,17 @@ def run_menu_excel_dry_run(args: argparse.Namespace) -> int:
         print(f"ROW={plan.store_row or 'STORE_NOT_FOUND'}")
         print(f"PERIOD={period_start:%Y-%m}")
         print(f"SOURCE_TOTAL={_money(plan.source_total_sales)}")
+        print(f"SOURCE_TOTAL_QUANTITY={'NOT_AVAILABLE' if source.source_total_quantity is None else f'{source.source_total_quantity:,}'}")
         print(f"CURRENT_AC={plan.ac_plan.current_value!r}")
         print(f"PROPOSED_AC={_money(plan.ac_plan.proposed_value)}")
         print(f"AC_STATUS={plan.ac_plan.status.value}")
         print(f"DIRECT_TARGET_TOTAL={_money(plan.direct_target_sales)}")
+        print(f"DIRECT_TARGET_QUANTITY={plan.direct_target_quantity:,}")
         print(f"SOURCE_OTHER_RESIDUAL={_money(plan.source_other_residual)}")
+        print(f"OTHER_RESIDUAL_QUANTITY={plan.source_other_residual_quantity:,}")
+        print(f"OPTION_QUANTITY={plan.option_quantity:,}")
+        print(f"RAW_PRODUCT_COUNT={plan.raw_product_count:,}")
+        print(f"BUSINESS_MENU_COUNT={plan.business_menu_count:,}")
         print(f"PROPOSED_OTHER_RESIDUAL={_money(plan.calculated_other_residual)}")
         print(f"RESIDUAL_MATCH={'YES' if plan.residual_match else 'NO'}")
         print(f"AB_FORMULA={plan.ab_validation.current_formula}")
@@ -366,6 +378,7 @@ def run_menu_excel_dry_run(args: argparse.Namespace) -> int:
             print(
                 f"COLUMN={cell.target_column} HEADER={cell.excel_group}/{cell.excel_header} "
                 f"CANONICAL={cell.canonical_code} CELL={cell.target_cell} "
+                f"QTY={_canonical_quantity(mapping_preview, cell.canonical_code):,} "
                 f"CURRENT={cell.current_value!r} PROPOSED={_money(cell.proposed_value)} STATUS={cell.status.value}"
             )
         print("-" * 120)
@@ -519,6 +532,13 @@ def _menu_dry_run_is_pass(plan) -> bool:
 
 def _money(value: int | None) -> str:
     return "NOT_AVAILABLE" if value is None else f"{value:,}"
+
+
+def _canonical_quantity(mapping_preview, canonical_code: str) -> int:
+    for aggregate in mapping_preview.aggregates:
+        if aggregate.canonical_code == canonical_code:
+            return aggregate.quantity
+    return 0
 
 
 if __name__ == "__main__":

@@ -124,6 +124,13 @@ class MenuSalesRecord:
     menu_name: str
     sales_amount: int
     sales_quantity: int | None = None
+    unit_price: int | None = None
+
+    @property
+    def average_realized_sales(self) -> float | None:
+        if not self.sales_quantity:
+            return None
+        return self.sales_amount / self.sales_quantity
 
 
 @dataclass(frozen=True)
@@ -134,6 +141,7 @@ class MenuMonthlySalesResult:
     period_end: date
     records: list[MenuSalesRecord]
     source_total_sales: int | None = None
+    source_total_quantity: int | None = None
 
 
 @dataclass(frozen=True)
