@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from copy import copy
+import re
 from dataclasses import dataclass
 from typing import Any
 
-from openpyxl.formula.translate import Translator
+from openpyxl.formula import Tokenizer
 from openpyxl.utils import (
     get_column_letter,
     range_boundaries,
@@ -288,9 +289,100 @@ def _copy_row_style(
         )
 
 
+_A1_REFERENCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])"
+    r"(\$?[A-Za-z]{1,3})"
+    r"(\$?)"
+    r"([1-9][0-9]*)"
+    r"(?![A-Za-z0-9_])"
+)
+
+
+def _shift_range_token_for_insert(
+    value: str,
+    insert_row: int,
+) -> str:
+    """
+    Shift only A1-style row references that point to rows
+    at or below the physical insertion point.
+
+    Examples for insert_row=7:
+
+        G6          -> G6
+        $AC$6       -> $AC$6
+
+        G7          -> G8
+        $AC$7       -> $AC$8
+
+        G8          -> G9
+        $AC8        -> $AC9
+
+        G8:AA8      -> G9:AA9
+    """
+
+    def replace_reference(match: re.Match[str]) -> str:
+
+        column = match.group(1)
+        absolute_row_marker = match.group(2)
+        row = int(
+            match.group(3)
+        )
+
+        if row >= insert_row:
+            row += 1
+
+        return (
+            f"{column}"
+            f"{absolute_row_marker}"
+            f"{row}"
+        )
+
+    return _A1_REFERENCE_RE.sub(
+        replace_reference,
+        value,
+    )
+
+
+def _translate_formula_for_insert(
+    formula: str,
+    insert_row: int,
+) -> str:
+    """
+    Apply Excel row-insertion semantics to references inside
+    one formula.
+
+    Only formula RANGE operands are changed.
+
+    This intentionally does NOT translate based on the formula
+    cell's own movement from old_coordinate to new_coordinate.
+    """
+
+    tokenizer = Tokenizer(
+        formula
+    )
+
+    for token in tokenizer.items:
+
+        if not (
+            token.type == "OPERAND"
+            and token.subtype == "RANGE"
+        ):
+            continue
+
+        token.value = (
+            _shift_range_token_for_insert(
+                token.value,
+                insert_row,
+            )
+        )
+
+    return tokenizer.render()
+
+
 def _translate_moved_formulas(
     worksheet,
     snapshots: tuple[_FormulaSnapshot, ...],
+    insert_row: int,
 ) -> int:
 
     translated_count = 0
@@ -299,17 +391,17 @@ def _translate_moved_formulas(
 
         try:
 
-            translated = Translator(
-                snapshot.formula,
-                origin=snapshot.old_coordinate,
-            ).translate_formula(
-                snapshot.new_coordinate
+            translated = (
+                _translate_formula_for_insert(
+                    snapshot.formula,
+                    insert_row,
+                )
             )
 
         except Exception as exc:
 
             raise ValueError(
-                "FORMULA_TRANSLATION_FAILED:"
+                "FORMULA_INSERT_TRANSLATION_FAILED:"
                 f"{snapshot.old_coordinate}:"
                 f"{snapshot.new_coordinate}:"
                 f"{snapshot.formula}"
@@ -322,6 +414,8 @@ def _translate_moved_formulas(
         translated_count += 1
 
     return translated_count
+
+
 
 
 def _source_total_quantity(plan) -> int:
@@ -544,6 +638,7 @@ def insert_quantity_row(
         _translate_moved_formulas(
             worksheet,
             formula_snapshots,
+            quantity_row,
         )
     )
 
