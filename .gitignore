@@ -30,6 +30,7 @@ release/
 *.exe
 *.msi
 *.spec.bak
+_patch_backup/
 
 # IDE and OS files
 .vscode/
