@@ -353,22 +353,42 @@ def run_menu_excel_dry_run(args: argparse.Namespace) -> int:
         plan = build_menu_excel_dry_run_plan(mapping_preview, worksheet, profile, store.store_name)
         breakdown = summarize_other_residual_by_reason(plan)
 
-        quantity_sales_row = plan.row
+        quantity_sales_row = plan.store_row
+
         quantity_row = (
-            plan.row + 1
-            if isinstance(plan.row, int)
-            else 0
-        )
-        quantity_ratio_row = (
-            plan.row + 2
-            if isinstance(plan.row, int)
+            plan.store_row + 1
+            if isinstance(plan.store_row, int)
+            and plan.store_row > 0
             else 0
         )
 
-        quantity_source_total = plan.source_total_quantity
-        quantity_direct_total = plan.direct_target_quantity
-        quantity_other_total = plan.other_residual_quantity
-        quantity_option_total = plan.option_quantity
+        quantity_ratio_row = (
+            plan.store_row + 2
+            if isinstance(plan.store_row, int)
+            and plan.store_row > 0
+            else 0
+        )
+
+        quantity_source_total = (
+            plan.source.source.source_total_quantity
+        )
+
+        quantity_direct_total = (
+            plan.direct_target_quantity
+        )
+
+        quantity_other_total = (
+            plan.source_other_residual_quantity
+        )
+
+        quantity_option_total = (
+            plan.option_quantity
+        )
+
+        quantity_by_canonical = {
+            aggregate.canonical_code: aggregate.quantity
+            for aggregate in plan.source.aggregates
+        }
 
         quantity_business_reconciliation = (
             quantity_direct_total
@@ -377,7 +397,8 @@ def run_menu_excel_dry_run(args: argparse.Namespace) -> int:
         )
 
         quantity_source_reconciliation = (
-            quantity_direct_total
+            quantity_source_total is not None
+            and quantity_direct_total
             + quantity_other_total
             + quantity_option_total
             == quantity_source_total
@@ -426,10 +447,10 @@ def run_menu_excel_dry_run(args: argparse.Namespace) -> int:
 
         for cell in plan.cells:
             print(
-                f"COLUMN={cell.column} "
+                f"COLUMN={cell.target_column} "
                 f"CANONICAL={cell.canonical_code} "
-                f"CELL={cell.column}{quantity_row} "
-                f"QUANTITY={cell.quantity:,}"
+                f"CELL={cell.target_column}{quantity_row} "
+                f"QUANTITY="f"{quantity_by_canonical.get(cell.canonical_code, 0):,}"
             )
 
         print(
@@ -444,8 +465,12 @@ def run_menu_excel_dry_run(args: argparse.Namespace) -> int:
             f"TOTAL_QUANTITY_CELL=AC{quantity_row}"
         )
         print(
-            f"TOTAL_QUANTITY="
-            f"{quantity_source_total:,}"
+            "TOTAL_QUANTITY="
+            + (
+                "NOT_AVAILABLE"
+                if quantity_source_total is None
+                else f"{quantity_source_total:,}"
+            )
         )
         print(
             f"DIRECT_QUANTITY="
