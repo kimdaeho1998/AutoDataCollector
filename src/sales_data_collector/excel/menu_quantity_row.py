@@ -32,6 +32,8 @@ class QuantityRowInsertResult:
     source_total_quantity: int
     direct_quantity: int
     other_quantity: int
+    option_quantity: int
+    ab_quantity: int
 
     formula_cells_translated: int
     merged_ranges_adjusted: int
@@ -492,12 +494,7 @@ def _validate_preinsert_contract(
             f"{ratio_label!r}"
         )
 
-    if int(plan.option_quantity) != 0:
 
-        raise ValueError(
-            "QUANTITY_ROW_OPTION_QUANTITY_UNSUPPORTED:"
-            f"{plan.option_quantity}"
-        )
 
     return (
         sales_row,
@@ -542,6 +539,15 @@ def insert_quantity_row(
         plan.source_other_residual_quantity
     )
 
+    option_quantity = int(
+        plan.option_quantity
+    )
+
+    ab_quantity = (
+        other_quantity
+        + option_quantity
+    )
+
     business_menu_count = int(
         plan.business_menu_count
     )
@@ -559,14 +565,16 @@ def insert_quantity_row(
             f"BUSINESS={business_menu_count}"
         )
 
-    if business_menu_count != source_total_quantity:
+    if (
+        business_menu_count
+        + option_quantity
+        != source_total_quantity
+    ):
 
-        # Current quantity-row contract intentionally excludes
-        # OPTION quantities. Because option_quantity must be zero,
-        # source and business quantity must be identical.
         raise ValueError(
             "SOURCE_QUANTITY_RECONCILIATION_FAILED:"
             f"BUSINESS={business_menu_count}:"
+            f"OPTION={option_quantity}:"
             f"SOURCE={source_total_quantity}"
         )
 
@@ -847,12 +855,14 @@ def insert_quantity_row(
         - actual_direct
     )
 
-    if calculated_other != other_quantity:
+    if calculated_other != ab_quantity:
 
         raise ValueError(
-            "POSTINSERT_OTHER_QUANTITY_MISMATCH:"
+            "POSTINSERT_AB_QUANTITY_MISMATCH:"
             f"ACTUAL={calculated_other}:"
-            f"EXPECTED={other_quantity}"
+            f"OTHER_MENU={other_quantity}:"
+            f"OPTION={option_quantity}:"
+            f"EXPECTED={ab_quantity}"
         )
 
     return QuantityRowInsertResult(
@@ -862,6 +872,8 @@ def insert_quantity_row(
         source_total_quantity=source_total_quantity,
         direct_quantity=direct_quantity,
         other_quantity=other_quantity,
+        option_quantity=option_quantity,
+        ab_quantity=ab_quantity,
         formula_cells_translated=translated_count,
         merged_ranges_adjusted=len(
             merge_snapshots
