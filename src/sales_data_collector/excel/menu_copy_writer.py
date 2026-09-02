@@ -12,6 +12,7 @@ from ..mapping.menu_mapping import MenuMappingStatus, MenuRowType
 from .menu_excel_dry_run import CellPlanStatus, MenuExcelDryRunPlan
 from .menu_template_profile import MenuTemplateProfile
 from .menu_template_resolver import ExcelDisposition
+from .menu_quantity_row import insert_quantity_row
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,12 @@ class MenuMonthlyCopyWriter:
                 same += 1
 
             analysis_rows = self._write_analysis_sheet(workbook, plan, profile, year=year, month=month)
+
+            quantity_row_result = insert_quantity_row(
+                worksheet,
+                plan,
+            )
+
             workbook.save(output)
 
             verified = load_workbook(output, data_only=False)
