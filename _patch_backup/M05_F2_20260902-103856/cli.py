@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import calendar
@@ -21,8 +21,7 @@ from .production import SalesAdminDryRun, SingleDaySalesCollector, default_targe
 from .mapping.template_resolver import SalesAdminTemplateResolver
 from .mapping.store_normalizer import normalize_store_name
 from .mapping.menu_mapping import MenuMappingStatus, build_menu_mapping_preview
-
-from .excel.menu_excel_dry_run import other_new_menu_inventoryfrom .writers.single_day_writer import SalesAdminSingleDayWriter
+from .writers.single_day_writer import SalesAdminSingleDayWriter
 from .utils import date_range, parse_ymd
 
 
@@ -393,54 +392,6 @@ def run_menu_excel_dry_run(args: argparse.Namespace) -> int:
         print("-" * 120)
         for key, value in breakdown.items():
             print(f"{key}={_money(value)}")
-
-        inventory = other_new_menu_inventory(plan)
-
-        print("-" * 120)
-        print("OTHER_NEW_MENU RAW INVENTORY")
-        print("-" * 120)
-
-        inventory_sales = 0
-        inventory_quantity = 0
-
-        for index, row in enumerate(inventory, start=1):
-            inventory_sales += int(row["sales_amount"])
-            inventory_quantity += int(row["quantity"])
-
-            avg = row["average_realized_sales"]
-
-            avg_text = (
-                "NOT_AVAILABLE"
-                if avg is None
-                else f"{avg:,.2f}"
-            )
-
-            print(
-                f"#{index:02d} "
-                f"RAW={row['raw_name']} | "
-                f"NORMALIZED={row['normalized_name']} | "
-                f"UNIT_PRICE={row['unit_price']!r} | "
-                f"QTY={row['quantity']:,} | "
-                f"SALES={row['sales_amount']:,} | "
-                f"AVG_REALIZED={avg_text} | "
-                f"STATUS={row['mapping_status']} | "
-                f"CANONICAL={row['canonical_code']} | "
-                f"REASON={row['mapping_reason']}"
-            )
-
-        print("-" * 120)
-        print(f"OTHER_NEW_MENU_ROW_COUNT={len(inventory)}")
-        print(f"OTHER_NEW_MENU_QUANTITY={inventory_quantity:,}")
-        print(f"OTHER_NEW_MENU_SALES={inventory_sales:,}")
-        print(
-            "OTHER_NEW_MENU_SALES_MATCH="
-            + (
-                "YES"
-                if inventory_sales == breakdown["OTHER_NEW_MENU"]
-                else "NO"
-            )
-        )
-
         print("=" * 120)
         return 0 if _menu_dry_run_is_pass(plan) else 1
     finally:
@@ -723,4 +674,3 @@ def _canonical_quantity(mapping_preview, canonical_code: str) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

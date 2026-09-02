@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 from dataclasses import dataclass
@@ -302,80 +302,6 @@ def summarize_other_residual_by_reason(plan: MenuExcelDryRunPlan) -> dict[str, i
     return buckets
 
 
-
-
-def other_new_menu_inventory(plan: MenuExcelDryRunPlan) -> tuple[dict[str, object], ...]:
-    """Return raw rows classified into OTHER_NEW_MENU.
-
-    This is diagnostic only.
-
-    It MUST remain aligned with summarize_other_residual_by_reason().
-    It does not mutate mapping, Excel disposition, or source records.
-    """
-
-    rows: list[dict[str, object]] = []
-
-    for item in plan.disposition.items:
-        if item.disposition != ExcelDisposition.OTHER_RESIDUAL:
-            continue
-
-        mapping = item.mapping
-        record = mapping.record
-        name = mapping.normalized_name
-
-        # GENERAL_DRINK
-        if mapping.canonical_code == "DRINK":
-            continue
-
-        # UNSPECIFIED_TTEOKBOKKI
-        if (
-            "떡볶이" in name
-            and mapping.status == MenuMappingStatus.AMBIGUOUS
-            and "밀키트" not in name
-        ):
-            continue
-
-        # MILKIT
-        if "밀키트" in name:
-            continue
-
-        # DELIVERY_FEE
-        if name == "배달료":
-            continue
-
-        quantity = record.sales_quantity or 0
-
-        average_realized_sales = (
-            None
-            if quantity == 0
-            else record.sales_amount / quantity
-        )
-
-        rows.append(
-            {
-                "raw_name": record.menu_name,
-                "normalized_name": name,
-                "unit_price": record.unit_price,
-                "quantity": quantity,
-                "sales_amount": record.sales_amount,
-                "average_realized_sales": average_realized_sales,
-                "mapping_status": mapping.status.value,
-                "canonical_code": mapping.canonical_code,
-                "mapping_reason": mapping.reason,
-                "row_type": mapping.row_type.value,
-            }
-        )
-
-    return tuple(
-        sorted(
-            rows,
-            key=lambda row: (
-                -int(row["sales_amount"]),
-                str(row["normalized_name"]),
-            ),
-        )
-    )
-
 def _quantity_by_disposition(disposition: MenuExcelTargetPreview, target: ExcelDisposition) -> int:
     return sum((item.mapping.record.sales_quantity or 0) for item in disposition.items if item.disposition == target)
 
@@ -394,4 +320,3 @@ def _raw_product_count(disposition: MenuExcelTargetPreview) -> int:
 
 def _business_menu_count(disposition: MenuExcelTargetPreview) -> int:
     return _raw_product_count(disposition) - _option_quantity(disposition)
-
