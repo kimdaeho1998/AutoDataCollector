@@ -193,80 +193,305 @@ def resolve_menu_target(worksheet, profile: MenuTemplateProfile, canonical_code:
     )
 
 
+def _effective_store_identity_value(
+    worksheet,
+    row: int,
+    column: int,
+):
+    """
+    Resolve the effective store identity value.
+
+    Normal cell:
+        return cell.value
+
+    Merged cell / empty member of a merged range:
+        return the top-left cell value.
+
+    Monthly menu batch processing modifies the CURRENT workbook by
+    inserting quantity rows. Store identity cells therefore must be
+    resolved against the workbook's current merged-range state.
+    """
+
+    cell = worksheet.cell(
+        row=row,
+        column=column,
+    )
+
+    if cell.value is not None:
+        return cell.value
+
+    for merged_range in worksheet.merged_cells.ranges:
+
+        if (
+            merged_range.min_row
+            <= row
+            <= merged_range.max_row
+            and
+            merged_range.min_col
+            <= column
+            <= merged_range.max_col
+        ):
+
+            return worksheet.cell(
+                row=merged_range.min_row,
+                column=merged_range.min_col,
+            ).value
+
+    return None
+
+
+def _resolve_store_block_layout(
+    worksheet,
+    *,
+    sales_row: int,
+    marker_column: int,
+) -> str | None:
+    """
+    Recognize both valid runtime layouts.
+
+    Original template:
+
+        sales
+        ratio
+
+    Expanded template:
+
+        sales
+        quantity
+        ratio
+    """
+
+    SALES = "\ub9e4\ucd9c"
+    QUANTITY = "\uac74\uc218"
+    RATIO = "\ube44\uc728"
+
+    sales_marker = worksheet.cell(
+        row=sales_row,
+        column=marker_column,
+    ).value
+
+    if (
+        str(sales_marker).strip()
+        != SALES
+    ):
+        return None
+
+    if sales_row + 1 > worksheet.max_row:
+        return None
+
+    next_marker = worksheet.cell(
+        row=sales_row + 1,
+        column=marker_column,
+    ).value
+
+    next_label = (
+        str(next_marker).strip()
+        if next_marker is not None
+        else ""
+    )
+
+    # ----------------------------------------------------------------------
+    # Original:
+    #
+    # sales
+    # ratio
+    # ----------------------------------------------------------------------
+
+    if next_label == RATIO:
+        return "SALES_RATIO"
+
+    # ----------------------------------------------------------------------
+    # Already expanded:
+    #
+    # sales
+    # quantity
+    # ratio
+    # ----------------------------------------------------------------------
+
+    if next_label == QUANTITY:
+
+        if (
+            sales_row + 2
+            > worksheet.max_row
+        ):
+            return None
+
+        next2_marker = worksheet.cell(
+            row=sales_row + 2,
+            column=marker_column,
+        ).value
+
+        next2_label = (
+            str(next2_marker).strip()
+            if next2_marker is not None
+            else ""
+        )
+
+        if next2_label == RATIO:
+            return "SALES_QUANTITY_RATIO"
+
+    return None
+
+
 def resolve_store_sales_row(
     worksheet,
     profile: MenuTemplateProfile,
     store_name: str,
 ) -> StoreMenuRow:
-    normalized_source = normalize_store_name(store_name)
+    """
+    Resolve one store's sales row from the CURRENT workbook.
 
-    exact_matches: list[tuple[int, str]] = []
-    normalized_matches: list[tuple[int, str]] = []
+    Matching priority:
 
-    for row in range(1, worksheet.max_row + 1):
-        value = worksheet.cell(
-            row=row,
-            column=profile.store_column,
-        ).value
+        1. raw exact
+        2. normalized exact
 
-        if not isinstance(value, str):
+    Explicitly forbidden:
+
+        - fuzzy match
+        - substring match
+        - suffix match
+        - row-order fallback
+        - Jinhae-Idong -> Idong alias
+    """
+
+    normalized_source = normalize_store_name(
+        store_name
+    )
+
+    store_column = getattr(
+        profile,
+        "store_column",
+        3,
+    )
+
+    sales_marker_column = getattr(
+        profile,
+        "sales_marker_column",
+        6,
+    )
+
+    exact_matches: list[
+        tuple[int, str, str]
+    ] = []
+
+    normalized_matches: list[
+        tuple[int, str, str]
+    ] = []
+
+
+    # ==================================================================================
+    # Scan CURRENT worksheet state.
+    # ==================================================================================
+
+    for row in range(
+        1,
+        worksheet.max_row + 1,
+    ):
+
+        layout = _resolve_store_block_layout(
+            worksheet,
+            sales_row=row,
+            marker_column=sales_marker_column,
+        )
+
+        if layout is None:
             continue
 
-        sales_marker = worksheet.cell(
-            row=row,
-            column=profile.sales_marker_column,
-        ).value
 
-        if sales_marker != "매출":
+        value = _effective_store_identity_value(
+            worksheet,
+            row,
+            store_column,
+        )
+
+        if not isinstance(
+            value,
+            str,
+        ):
             continue
 
-        if row >= worksheet.max_row:
-            continue
-
-        ratio_marker = worksheet.cell(
-            row=row + 1,
-            column=profile.sales_marker_column,
-        ).value
-
-        if ratio_marker != "비율":
-            continue
 
         raw_excel_name = value.strip()
 
-        # ------------------------------------------------------------------
-        # Priority 1:
-        # exact source ↔ Excel store-name match.
-        # ------------------------------------------------------------------
-        if raw_excel_name == store_name.strip():
-            exact_matches.append((row, value))
+        if not raw_excel_name:
             continue
 
-        # ------------------------------------------------------------------
-        # Priority 2:
-        # Daily/Menu shared normalized identity.
-        # ------------------------------------------------------------------
-        normalized_excel = normalize_store_name(value)
 
-        if normalized_excel == normalized_source:
-            normalized_matches.append((row, value))
+        # ------------------------------------------------------------------
+        # 1. Raw exact
+        # ------------------------------------------------------------------
 
-    # ----------------------------------------------------------------------
-    # Exact raw match wins.
-    # ----------------------------------------------------------------------
-    if len(exact_matches) == 1:
-        row, excel_name = exact_matches[0]
+        if (
+            raw_excel_name
+            == store_name.strip()
+        ):
+
+            exact_matches.append(
+                (
+                    row,
+                    raw_excel_name,
+                    layout,
+                )
+            )
+
+            continue
+
+
+        # ------------------------------------------------------------------
+        # 2. Normalized exact
+        # ------------------------------------------------------------------
+
+        normalized_excel = normalize_store_name(
+            raw_excel_name
+        )
+
+        if (
+            normalized_excel
+            == normalized_source
+        ):
+
+            normalized_matches.append(
+                (
+                    row,
+                    raw_excel_name,
+                    layout,
+                )
+            )
+
+
+    # ==================================================================================
+    # Exact match
+    # ==================================================================================
+
+    if len(
+        exact_matches
+    ) == 1:
+
+        (
+            row,
+            excel_name,
+            layout,
+        ) = exact_matches[0]
 
         return StoreMenuRow(
             row_index=row,
             store_name=store_name,
             status=MenuTargetStatus.TARGET_RESOLVED,
-            reason="STORE_SALES_ROW_MATCHED",
+            reason=(
+                "STORE_SALES_ROW_MATCHED:"
+                + layout
+            ),
             normalized_store_name=normalized_source,
             excel_store_name=excel_name,
             match_source="daily_shared_exact",
         )
 
-    if len(exact_matches) > 1:
+
+    if len(
+        exact_matches
+    ) > 1:
+
         return StoreMenuRow(
             row_index=0,
             store_name=store_name,
@@ -277,23 +502,39 @@ def resolve_store_sales_row(
             match_source="daily_shared_exact",
         )
 
-    # ----------------------------------------------------------------------
-    # Shared normalized match.
-    # ----------------------------------------------------------------------
-    if len(normalized_matches) == 1:
-        row, excel_name = normalized_matches[0]
+
+    # ==================================================================================
+    # Normalized exact
+    # ==================================================================================
+
+    if len(
+        normalized_matches
+    ) == 1:
+
+        (
+            row,
+            excel_name,
+            layout,
+        ) = normalized_matches[0]
 
         return StoreMenuRow(
             row_index=row,
             store_name=store_name,
             status=MenuTargetStatus.TARGET_RESOLVED,
-            reason="STORE_SALES_ROW_MATCHED",
+            reason=(
+                "STORE_SALES_ROW_MATCHED:"
+                + layout
+            ),
             normalized_store_name=normalized_source,
             excel_store_name=excel_name,
             match_source="daily_shared_normalized_exact",
         )
 
-    if len(normalized_matches) > 1:
+
+    if len(
+        normalized_matches
+    ) > 1:
+
         return StoreMenuRow(
             row_index=0,
             store_name=store_name,
@@ -304,9 +545,11 @@ def resolve_store_sales_row(
             match_source="daily_shared_normalized_exact",
         )
 
-    # ----------------------------------------------------------------------
-    # Fail closed.
-    # ----------------------------------------------------------------------
+
+    # ==================================================================================
+    # Fail closed
+    # ==================================================================================
+
     return StoreMenuRow(
         row_index=0,
         store_name=store_name,

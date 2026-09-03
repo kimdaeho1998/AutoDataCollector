@@ -1,9 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import calendar
 import shutil
 import sys
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from sales_data_collector.cli import (
     login_and_get_stores,
     resolve_stores,
 )
+from sales_data_collector.models import Store
 
 from sales_data_collector.excel.menu_excel_dry_run import (
     CellPlanStatus,
@@ -36,11 +38,27 @@ from sales_data_collector.excel.menu_excel_dry_run import (
 )
 
 from sales_data_collector.excel.menu_quantity_row import (
+    DIRECT_END_COLUMN,
+    DIRECT_START_COLUMN,
+    OTHER_COLUMN,
+    QUANTITY_LABEL,
+    RATIO_LABEL,
+    TOTAL_COLUMN,
+    UNTOUCHED_COLUMN,
+    _capture_affected_merges,
+    _capture_moved_formulas,
+    _copy_row_style,
+    _label,
+    _remove_affected_merges,
+    _restore_affected_merges,
+    _translate_moved_formulas,
     insert_quantity_row,
 )
 
 from sales_data_collector.excel.menu_template_resolver import (
     ExcelDisposition,
+    MenuTargetStatus,
+    resolve_store_sales_row,
 )
 
 from sales_data_collector.mapping.menu_mapping import (
@@ -118,26 +136,21 @@ def ensure_plan_writable(plan) -> None:
             f"AB_FORMULA_INVALID:{plan.store_name}"
         )
 
-    if plan.ac_plan.status not in {
-        CellPlanStatus.READY,
-        CellPlanStatus.SAME_VALUE,
-    }:
+    if not _is_writable_value_cell(
+        plan.ac_plan
+    ):
         raise ValueError(
             f"AC_NOT_WRITABLE:"
             f"{plan.store_name}:"
             f"{plan.ac_plan.status.value}"
         )
 
-    allowed = {
-        CellPlanStatus.READY,
-        CellPlanStatus.SAME_VALUE,
-        CellPlanStatus.ZERO_PLACEHOLDER,
-    }
-
     blocked = [
         cell
         for cell in plan.cells
-        if cell.status not in allowed
+        if not _is_writable_value_cell(
+            cell
+        )
     ]
 
     if blocked:
@@ -173,6 +186,46 @@ def ensure_plan_writable(plan) -> None:
                 f"SOURCE={source_total_quantity}:"
                 f"CALCULATED={calculated}"
             )
+
+
+def repair_ab_residual_formula(
+    worksheet,
+    plan,
+) -> bool:
+    if plan.ab_validation.formula_valid:
+        return False
+
+    if not plan.store_row:
+        return False
+
+    target_cell = f"AB{plan.store_row}"
+    expected = (
+        f"=AC{plan.store_row}"
+        f"-SUM(G{plan.store_row}:AA{plan.store_row})"
+    )
+
+    worksheet[
+        target_cell
+    ].value = expected
+
+    return True
+
+
+def _is_writable_value_cell(
+    cell,
+) -> bool:
+    """W6-style policy: ERP values may replace existing static values."""
+
+    if cell.status in {
+        CellPlanStatus.READY,
+        CellPlanStatus.SAME_VALUE,
+        CellPlanStatus.ZERO_PLACEHOLDER,
+        CellPlanStatus.CONFLICT,
+        CellPlanStatus.FORMULA_PROTECTED,
+    }:
+        return True
+
+    return False
 
 
 # ====================================================================================================
@@ -375,13 +428,6 @@ def apply_store(
     analysis_sheet,
 ):
 
-    print("")
-    print("=" * 120)
-    print(
-        f"STORE START | {store.store_name}"
-    )
-    print("=" * 120)
-
     # --------------------------------------------------------------------------------
     # MagicERP monthly menu source
     # --------------------------------------------------------------------------------
@@ -394,6 +440,13 @@ def apply_store(
         store_idx=store.magic_store_id,
         store_name=store.store_name,
     )
+
+    if is_empty_menu_source(
+        source
+    ):
+        raise ValueError(
+            "MENU_SOURCE_NO_DATA"
+        )
 
     # --------------------------------------------------------------------------------
     # Mapping
@@ -421,6 +474,17 @@ def apply_store(
         store.store_name,
     )
 
+    if repair_ab_residual_formula(
+        worksheet,
+        plan,
+    ):
+        plan = build_menu_excel_dry_run_plan(
+            mapping_preview,
+            worksheet,
+            profile,
+            store.store_name,
+        )
+
     ensure_plan_writable(
         plan
     )
@@ -436,30 +500,45 @@ def apply_store(
     written = 0
     same = 0
 
+    for column in range(
+        DIRECT_START_COLUMN,
+        DIRECT_END_COLUMN + 1,
+    ):
+        worksheet.cell(
+            row=sales_row,
+            column=column,
+        ).value = 0
+
+    # G:AA were intentionally reset to zero above.
+    #
+    # Therefore every ERP-backed direct menu cell MUST be written again,
+    # including SAME_VALUE cells.
+    #
+    # SAME_VALUE only means:
+    #     original workbook value == ERP proposed value
+    #
+    # It does NOT mean the write can be skipped after the row has already
+    # been zero-initialized.
     for cell in plan.cells:
 
-        if cell.status in {
-            CellPlanStatus.READY,
-            CellPlanStatus.ZERO_PLACEHOLDER,
-        }:
+        if _is_writable_value_cell(cell):
 
             worksheet[
                 cell.target_cell
             ].value = cell.proposed_value
 
-            written += 1
-
-        elif (
-            cell.status
-            == CellPlanStatus.SAME_VALUE
-        ):
-
-            same += 1
+            if cell.status == CellPlanStatus.SAME_VALUE:
+                same += 1
+            else:
+                written += 1
 
     # AC = monthly source total sales
     if (
-        plan.ac_plan.status
-        == CellPlanStatus.READY
+        _is_writable_value_cell(
+            plan.ac_plan
+        )
+        and plan.ac_plan.status
+        != CellPlanStatus.SAME_VALUE
     ):
 
         worksheet[
@@ -509,87 +588,12 @@ def apply_store(
     # --------------------------------------------------------------------------------
 
     print(
-        f"STORE={store.store_name}"
-    )
-
-    print(
-        f"EXCEL_STORE={plan.excel_store_name}"
-    )
-
-    print(
-        f"SALES_ROW={quantity_result.sales_row}"
-    )
-
-    print(
-        f"QUANTITY_ROW={quantity_result.quantity_row}"
-    )
-
-    print(
-        f"RATIO_ROW={quantity_result.ratio_row}"
-    )
-
-    print(
-        f"MONTHLY_TOTAL_SALES="
-        f"{plan.source_total_sales:,}"
-    )
-
-    print(
-        f"MONTHLY_TOTAL_QUANTITY="
-        f"{quantity_result.source_total_quantity:,}"
-    )
-
-    print(
-        f"DIRECT_SALES="
-        f"{plan.direct_target_sales:,}"
-    )
-
-    print(
-        f"OTHER_SALES="
-        f"{plan.source_other_residual:,}"
-    )
-
-    print(
-        f"DIRECT_QUANTITY="
-        f"{quantity_result.direct_quantity:,}"
-    )
-
-    print(
-        f"OTHER_QUANTITY="
-        f"{quantity_result.other_quantity:,}"
-    )
-
-    print(
-        f"OPTION_QUANTITY="
-        f"{quantity_result.option_quantity:,}"
-    )
-
-    print(
-        f"AB_QUANTITY="
-        f"{quantity_result.ab_quantity:,}"
-    )
-
-    print(
-        f"WRITTEN_CELLS={written}"
-    )
-
-    print(
-        f"SAME_VALUE_CELLS={same}"
-    )
-
-    print(
-        f"ANALYSIS_ROWS={analysis_count}"
-    )
-
-    print(
-        "SALES_RECONCILIATION=PASS"
-    )
-
-    print(
-        "QUANTITY_RECONCILIATION=PASS"
-    )
-
-    print(
-        "STORE_RESULT=PASS"
+        "[PREVIEW] status=READY source=ERP "
+        f"period={period_start:%Y-%m} "
+        f"store={store.store_name} "
+        f"quantity={quantity_result.source_total_quantity} "
+        f"gross={plan.source_total_sales} "
+        f"cells={quantity_result.sales_row},{quantity_result.quantity_row},{quantity_result.ratio_row}"
     )
 
     return {
@@ -603,9 +607,261 @@ def apply_store(
     }
 
 
+def apply_skipped_store(
+    *,
+    worksheet,
+    profile,
+    store_name: str,
+    reason: str,
+):
+    """
+    W6-compatible skip policy for inactive or no-data stores.
+
+    The source workbook is already copied. For skipped menu stores we still
+    make the visible three-row block explicit:
+
+        sales / quantity / ratio
+
+    and write '-' to G:AC so users do not see misleading #DIV/0! formulas.
+    """
+
+    store_row = resolve_store_sales_row(
+        worksheet,
+        profile,
+        store_name,
+    )
+
+    if store_row.status != MenuTargetStatus.TARGET_RESOLVED:
+        raise ValueError(
+            f"SKIP_STORE_ROW_NOT_RESOLVED:{store_name}:{store_row.status.value}"
+        )
+
+    sales_row = int(store_row.row_index)
+    next_row = sales_row + 1
+    next_label = _label(
+        worksheet.cell(
+            row=next_row,
+            column=4,
+        ).value
+    )
+
+    if next_label == QUANTITY_LABEL:
+        quantity_row = next_row
+        ratio_row = sales_row + 2
+    else:
+        if next_label != RATIO_LABEL:
+            raise ValueError(
+                f"SKIP_RATIO_ROW_LABEL_MISMATCH:{store_name}:F{next_row}:{next_label!r}"
+            )
+
+        quantity_row = sales_row + 1
+        ratio_row = sales_row + 2
+
+        formula_snapshots = _capture_moved_formulas(
+            worksheet,
+            quantity_row,
+        )
+        merge_snapshots = _capture_affected_merges(
+            worksheet,
+            quantity_row,
+        )
+
+        _remove_affected_merges(
+            worksheet,
+            merge_snapshots,
+        )
+
+        worksheet.insert_rows(
+            quantity_row,
+            amount=1,
+        )
+
+        _copy_row_style(
+            worksheet,
+            source_row=sales_row,
+            destination_row=quantity_row,
+        )
+
+        _translate_moved_formulas(
+            worksheet,
+            formula_snapshots,
+            quantity_row,
+        )
+
+        for column in range(
+            1,
+            UNTOUCHED_COLUMN + 1,
+        ):
+            worksheet.cell(
+                row=quantity_row,
+                column=column,
+            ).value = None
+
+        worksheet.cell(
+            row=quantity_row,
+            column=4,
+        ).value = QUANTITY_LABEL
+
+        _restore_affected_merges(
+            worksheet,
+            merge_snapshots,
+        )
+
+    for row in (
+        sales_row,
+        quantity_row,
+        ratio_row,
+    ):
+        for column in range(
+            DIRECT_START_COLUMN,
+            TOTAL_COLUMN + 1,
+        ):
+            worksheet.cell(
+                row=row,
+                column=column,
+            ).value = "-"
+
+    worksheet.cell(
+        row=quantity_row,
+        column=4,
+    ).value = QUANTITY_LABEL
+
+    reason_code = _skip_reason_code(reason)
+
+    print(
+        f"[SKIP] status=SKIPPED_PLACEHOLDER store={store_name} "
+        f"reason={reason_code} sales_row={sales_row} "
+        f"quantity_row={quantity_row} ratio_row={ratio_row}"
+    )
+
+    return {
+        "store": store_name,
+        "sales_row": sales_row,
+        "quantity_row": quantity_row,
+        "ratio_row": ratio_row,
+        "sales": "-",
+        "quantity": "-",
+        "analysis_rows": 0,
+        "skipped": True,
+        "skip_reason": reason_code,
+    }
+
+
+def menu_store_category(
+    worksheet,
+    profile,
+    store_name: str,
+) -> str | None:
+    store_row = resolve_store_sales_row(
+        worksheet,
+        profile,
+        store_name,
+    )
+
+    if store_row.status != MenuTargetStatus.TARGET_RESOLVED:
+        return None
+
+    value = worksheet.cell(
+        row=store_row.row_index,
+        column=1,
+    ).value
+
+    return str(value).strip() if value is not None else None
+
+
+def is_inactive_menu_category(
+    category: str | None,
+) -> bool:
+    if not category:
+        return False
+
+    compact = str(category).replace(" ", "")
+    return "\uc911\ub2e8" in compact or "\ud3d0\uc810" in compact
+
+
+def is_empty_menu_source(
+    source,
+) -> bool:
+    records = getattr(source, "records", None) or []
+    total_sales = getattr(source, "source_total_sales", None)
+    total_quantity = getattr(source, "source_total_quantity", None)
+
+    return (
+        not records
+        and total_sales in (None, 0)
+        and total_quantity in (None, 0)
+    )
+
+
+def _summary_value(
+    value,
+) -> str:
+    if isinstance(
+        value,
+        int,
+    ):
+        return f"{value:,}"
+
+    return str(
+        value
+    )
+
+
+def _skip_reason_code(
+    reason: str,
+) -> str:
+    if not reason:
+        return "SKIPPED"
+
+    if "INACTIVE_CATEGORY" in reason:
+        return "INACTIVE"
+
+    if "MAGICERP_STORE_NOT_FOUND" in reason:
+        return "NO_ERP_STORE"
+
+    if (
+        "contains no parseable menu rows" in reason
+        or "MENU_SOURCE_NO_DATA" in reason
+        or "NO_DATA" in reason
+    ):
+        return "NO_MENU_DATA"
+
+    if "AC_NOT_WRITABLE" in reason:
+        return "TOTAL_CELL_NOT_WRITABLE"
+
+    if "MENU_CELL_NOT_WRITABLE" in reason:
+        return "MENU_CELL_NOT_WRITABLE"
+
+    if "FORMULA_PROTECTED" in reason:
+        return "FORMULA_PROTECTED"
+
+    return reason.split(";", 1)[0].split(":", 1)[0]
+
+
+def _is_placeholder_skip_reason(
+    reason: str,
+) -> bool:
+    code = _skip_reason_code(
+        reason
+    )
+
+    return code in {
+        "INACTIVE",
+        "NO_ERP_STORE",
+        "NO_MENU_DATA",
+    }
+
+
 # ====================================================================================================
 # STORE RESOLUTION
 # ====================================================================================================
+
+@dataclass(frozen=True)
+class RequestedStoreTarget:
+    requested_name: str
+    store: Store | None
+    skip_reason: str | None = None
+
 
 def resolve_requested_stores(
     available_stores,
@@ -626,10 +882,14 @@ def resolve_requested_stores(
         )
 
         if not matches:
-            raise ValueError(
-                f"MAGICERP_STORE_NOT_FOUND:"
-                f"{requested_name}"
+            resolved.append(
+                RequestedStoreTarget(
+                    requested_name=requested_name,
+                    store=None,
+                    skip_reason="MAGICERP_STORE_NOT_FOUND",
+                )
             )
+            continue
 
         if len(matches) != 1:
             raise ValueError(
@@ -638,7 +898,10 @@ def resolve_requested_stores(
             )
 
         resolved.append(
-            matches[0]
+            RequestedStoreTarget(
+                requested_name=requested_name,
+                store=matches[0],
+            )
         )
 
     return resolved
@@ -672,18 +935,16 @@ def main() -> int:
         )
 
     if output_path.exists():
-        raise ValueError(
-            f"OUTPUT_ALREADY_EXISTS:{output_path}"
-        )
+        output_path.unlink()
 
     if args.month < 1 or args.month > 12:
         raise ValueError(
             "MONTH_OUT_OF_RANGE"
         )
 
-    if len(args.store_name) < 2:
+    if len(args.store_name) < 1:
         raise ValueError(
-            "AT_LEAST_TWO_STORE_NAMES_REQUIRED"
+            "AT_LEAST_ONE_STORE_NAME_REQUIRED"
         )
 
     period_start = date(
@@ -792,7 +1053,7 @@ def main() -> int:
             )
         )
 
-        target_stores = (
+        target_store_targets = (
             resolve_requested_stores(
                 available_stores,
                 args.store_name,
@@ -801,10 +1062,15 @@ def main() -> int:
 
         print(
             f"[INFO] TARGET_STORE_COUNT="
-            f"{len(target_stores)}"
+            f"{len(target_store_targets)}"
         )
 
         results = []
+        skipped_inactive = 0
+        skipped_no_erp_data = 0
+        skipped_no_menu_data = 0
+        placeholder_failures = []
+        failures = []
 
         # --------------------------------------------------------------------------------
         # STORE LOOP
@@ -815,30 +1081,132 @@ def main() -> int:
         # Previous quantity insertions are already included.
         # --------------------------------------------------------------------------------
 
-        for store in target_stores:
+        for target in target_store_targets:
 
-            result = apply_store(
-                client=client,
-                workbook=workbook,
-                worksheet=worksheet,
-                profile=profile,
-                store=store,
-                brand_idx=DEFAULT_BRAND_IDX,
-                brand_name=DEFAULT_BRAND_NAME,
-                period_start=period_start,
-                period_end=period_end,
-                year=args.year,
-                month=args.month,
-                analysis_sheet=analysis_sheet,
+            store_name = (
+                target.store.store_name
+                if target.store is not None
+                else target.requested_name
             )
 
-            results.append(
-                result
-            )
+            try:
+                if target.store is None:
+                    skipped_no_erp_data += 1
+                    result = apply_skipped_store(
+                        worksheet=worksheet,
+                        profile=profile,
+                        store_name=store_name,
+                        reason=target.skip_reason or "MAGICERP_STORE_NOT_FOUND",
+                    )
+                    results.append(
+                        result
+                    )
+                    continue
+
+                category = menu_store_category(
+                    worksheet,
+                    profile,
+                    store_name,
+                )
+
+                if is_inactive_menu_category(
+                    category
+                ):
+                    skipped_inactive += 1
+                    result = apply_skipped_store(
+                        worksheet=worksheet,
+                        profile=profile,
+                        store_name=store_name,
+                        reason=f"INACTIVE_CATEGORY:{category}",
+                    )
+                    results.append(
+                        result
+                    )
+                    continue
+
+                result = apply_store(
+                    client=client,
+                    workbook=workbook,
+                    worksheet=worksheet,
+                    profile=profile,
+                    store=target.store,
+                    brand_idx=DEFAULT_BRAND_IDX,
+                    brand_name=DEFAULT_BRAND_NAME,
+                    period_start=period_start,
+                    period_end=period_end,
+                    year=args.year,
+                    month=args.month,
+                    analysis_sheet=analysis_sheet,
+                )
+
+                results.append(
+                    result
+                )
+
+            except Exception as exc:
+                reason = str(exc)
+
+                if not _is_placeholder_skip_reason(
+                    reason
+                ):
+                    detail = (
+                        f"store={store_name} reason={reason}"
+                    )
+                    failures.append(
+                        detail
+                    )
+                    print(
+                        f"[FAIL] status=FAILED store={store_name} "
+                        f"reason={_skip_reason_code(reason)}"
+                    )
+                    continue
+
+                if "MAGICERP_STORE_NOT_FOUND" in reason:
+                    skipped_no_erp_data += 1
+                else:
+                    skipped_no_menu_data += 1
+
+                try:
+                    result = apply_skipped_store(
+                        worksheet=worksheet,
+                        profile=profile,
+                        store_name=store_name,
+                        reason=reason,
+                    )
+                    results.append(
+                        result
+                    )
+                except Exception as placeholder_exc:
+                    detail = (
+                        f"store={store_name} reason={reason} "
+                        f"placeholder_error={placeholder_exc}"
+                    )
+                    placeholder_failures.append(
+                        detail
+                    )
+                    print(
+                        f"[FAIL] {detail}"
+                    )
 
         # --------------------------------------------------------------------------------
         # Finish analysis sheet
         # --------------------------------------------------------------------------------
+
+        if placeholder_failures:
+            raise ValueError(
+                "MENU_PLACEHOLDER_FAILURES:"
+                + "; ".join(
+                    placeholder_failures
+                )
+            )
+
+        if failures:
+            raise ValueError(
+                "MENU_STORE_FAILURES:"
+                + "; ".join(
+                    failures
+                )
+            )
 
         analysis_sheet.auto_filter.ref = (
             analysis_sheet.dimensions
@@ -874,45 +1242,21 @@ def main() -> int:
             output_path
         )
 
-        print("")
-        print("=" * 120)
-        print("MONTHLY MENU MULTI-STORE COMPLETE")
-        print("=" * 120)
-
         print(
-            f"OUTPUT={output_path}"
+            f"[WRITE] output={output_path}"
         )
 
         print(
-            f"STORE_COUNT={len(results)}"
+            f"[SUMMARY] period={period_start:%Y-%m} stores={len(results)} "
+            f"skipped_inactive={skipped_inactive} "
+            f"skipped_no_erp_data={skipped_no_erp_data} "
+            f"skipped_no_menu_data={skipped_no_menu_data} "
+            f"analysis_rows={sum(r['analysis_rows'] for r in results)}"
         )
 
-        print(
-            f"ANALYSIS_ROW_TOTAL="
-            f"{sum(r['analysis_rows'] for r in results)}"
-        )
-
-        for index, result in enumerate(
-            results,
-            start=1,
-        ):
-
-            print(
-                f"STORE_{index}="
-                f"{result['store']} | "
-                f"SALES_ROW={result['sales_row']} | "
-                f"QUANTITY_ROW={result['quantity_row']} | "
-                f"RATIO_ROW={result['ratio_row']} | "
-                f"SALES={result['sales']:,} | "
-                f"QUANTITY={result['quantity']:,}"
-            )
-
-        print("")
         print(
             "BATCH_RESULT=PASS"
         )
-
-        print("=" * 120)
 
         return 0
 

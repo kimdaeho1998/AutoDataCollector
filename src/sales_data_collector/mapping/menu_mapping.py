@@ -70,6 +70,11 @@ class MenuMappingPreview:
 
 
 ALIASES: dict[str, str] = {
+    '꼬마김밥 1줄': 'KIMBAP_1',
+    '와사비크래마요 4줄': 'KIMBAP_WASABI_CRAB_MAYO',
+    '매콤 진미 꼬마김밥 4줄': 'KIMBAP_SPICY_JINMI',
+    '유부꼬마김밥 4줄': 'KIMBAP_TOFU_SKIN',
+    '선비식혜': 'SIKHYE',
     '쫄면(매운맛)': 'JJOLMYEON_SPICY',
     '쫄면(순한맛)': 'JJOLMYEON_MILD',
     '매콤진미 꼬마김밥 4줄': 'KIMBAP_SPICY_JINMI',
@@ -120,7 +125,27 @@ AMBIGUOUS: dict[str, tuple[str, ...]] = {
 
 def normalize_menu_name(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value)
-    return re.sub(r"\s+", " ", normalized.replace("\u00a0", " ")).strip()
+
+    normalized = normalized.replace("\u00a0", " ")
+    normalized = normalized.replace("\u3000", " ")
+
+    # Collapse ordinary whitespace first.
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    # MagicERP legacy menu names sometimes contain presentation-only
+    # trailing periods, e.g. "꼬마김밥 5줄." / "선비우동.".
+    normalized = re.sub(r"\.+$", "", normalized).strip()
+
+    # Normalize spacing around parentheses.
+    normalized = re.sub(r"\s*\(\s*", "(", normalized)
+    normalized = re.sub(r"\s*\)\s*", ")", normalized)
+
+    # Normalize spacing around compound-menu '+' separators.
+    normalized = re.sub(r"\s*\+\s*", "+", normalized)
+
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    return normalized
 
 
 def classify_menu_record(record: MenuSalesRecord) -> MenuMappingResult:

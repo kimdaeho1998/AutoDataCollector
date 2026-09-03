@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import re
+
 import argparse
 import calendar
 import os
+from dataclasses import replace
 from datetime import date
 from getpass import getpass
 from pathlib import Path
@@ -51,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--production-dry-run", action="store_true", help="Preview one production workbook update without writing.")
     parser.add_argument("--production-write", action="store_true", help="Copy a workbook and write confirmed production updates.")
     parser.add_argument("--menu-monthly-preview", action="store_true", help="Preview one store's monthly menu sales without writing.")
+    parser.add_argument(
+        "--menu-monthly-batch",
+        action="store_true",
+        help="Collect monthly menu sales for multiple stores and write one workbook copy.",
+    )
     parser.add_argument("--menu-mapping-preview", action="store_true", help="Preview raw menu normalization and mapping without writing.")
     parser.add_argument("--menu-excel-dry-run", action="store_true", help="Plan monthly menu Excel updates without writing or saving.")
     parser.add_argument("--menu-excel-write-copy", action="store_true", help="Copy a menu workbook and safely write one monthly menu update.")
@@ -99,6 +107,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.menu_monthly_preview = True
         if args.menu_excel_dry_run and args.menu_excel_write_copy:
             parser.error("--menu-excel-dry-run and --menu-excel-write-copy cannot be used together")
+        if args.menu_monthly_batch:
+            return run_menu_monthly_batch(args)
+
         if args.menu_excel_write_copy:
             return run_menu_excel_write_copy(args)
         if args.menu_excel_dry_run:
@@ -576,6 +587,215 @@ def run_menu_excel_dry_run(args: argparse.Namespace) -> int:
         client.logout()
 
 
+
+def run_menu_monthly_batch(args: argparse.Namespace) -> int:
+    """
+    Execute the validated multi-store monthly menu collector.
+
+    Reuse the verified monthly menu batch module in the current process so
+    a PyInstaller onefile release never depends on an external script path.
+    """
+
+    import os
+    import sys
+    from pathlib import Path
+
+    if not args.template:
+        raise ValueError(
+            "--template is required for --menu-monthly-batch"
+        )
+
+    if not args.output:
+        raise ValueError(
+            "--output is required for --menu-monthly-batch"
+        )
+
+    if args.year is None or args.month is None:
+        raise ValueError(
+            "--year and --month are required for --menu-monthly-batch"
+        )
+
+    store_names = list(args.store_name or [])
+
+    if args.all_stores and store_names:
+        raise ValueError("use either --all-stores or --store-name")
+
+    if args.all_stores:
+        store_names = discover_menu_template_store_names(Path(args.template))
+
+    if not store_names:
+        raise ValueError("--menu-monthly-batch requires --all-stores or one or more --store-name")
+
+    child_env = os.environ.copy()
+    child_env["COLLECTOR_BASE_URL"] = str(args.base_url)
+    child_env["COLLECTOR_BRAND_IDX"] = str(args.brand_idx)
+    child_env["COLLECTOR_BRAND_NAME"] = str(args.brand_name)
+
+    batch_argv = [
+        "menu_monthly_batch",
+        "--template",
+        str(args.template),
+        "--output",
+        str(args.output),
+        "--year",
+        str(args.year),
+        "--month",
+        str(args.month),
+    ]
+
+    for store_name in store_names:
+        batch_argv.extend(
+            [
+                "--store-name",
+                str(store_name),
+            ]
+        )
+
+    print("[INFO] Starting multi-store monthly menu collection...")
+    print(f"[INFO] STORE_COUNT={len(store_names)}")
+
+    import menu_monthly_batch
+
+    old_argv = sys.argv[:]
+    old_env = {
+        key: os.environ.get(key)
+        for key in (
+            "COLLECTOR_BASE_URL",
+            "COLLECTOR_BRAND_IDX",
+            "COLLECTOR_BRAND_NAME",
+        )
+    }
+    try:
+        os.environ.update(child_env)
+        sys.argv = batch_argv
+        return int(menu_monthly_batch.main())
+    finally:
+        sys.argv = old_argv
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def discover_menu_template_store_names(
+    template: Path,
+) -> list[str]:
+    """
+    Read target stores from the unified monthly menu workbook.
+
+    Unified workbook contract:
+
+        A = store name
+        D = sales / count / ratio row label
+
+    Both source layout and already-processed layout are supported.
+    """
+
+    workbook = load_workbook(
+        template,
+        data_only=False,
+    )
+
+    try:
+
+        profile = infer_menu_template_profile(
+            workbook
+        )
+
+        worksheet = workbook[
+            profile.sheet_name
+        ]
+
+
+        SALES = "\uB9E4\uCD9C"
+
+
+        stores: list[str] = []
+        seen: dict[str, str] = {}
+
+
+        for row_index in range(
+            1,
+            worksheet.max_row + 1,
+        ):
+
+            # Unified contract:
+            #
+            # A = store name
+            # D = row type
+
+            store_value = worksheet.cell(
+                row=row_index,
+                column=1,
+            ).value
+
+            marker_value = worksheet.cell(
+                row=row_index,
+                column=4,
+            ).value
+
+
+            if not isinstance(
+                store_value,
+                str,
+            ):
+                continue
+
+
+            if str(
+                marker_value
+                or ""
+            ).strip() != SALES:
+                continue
+
+
+            store_name = store_value.strip()
+
+            if not store_name:
+                continue
+
+
+            normalized = normalize_store_name(
+                store_name
+            )
+
+
+            previous = seen.get(
+                normalized
+            )
+
+
+            if (
+                previous is not None
+                and previous != store_name
+            ):
+
+                raise ValueError(
+                    "DUPLICATE_TEMPLATE_STORE:"
+                    f"{previous}:"
+                    f"{store_name}"
+                )
+
+
+            if previous is None:
+
+                seen[
+                    normalized
+                ] = store_name
+
+                stores.append(
+                    store_name
+                )
+
+
+        return stores
+
+    finally:
+
+        workbook.close()
+
+
 def run_menu_excel_write_copy(args: argparse.Namespace) -> int:
     if not args.output:
         raise ValueError("--output is required for --menu-excel-write-copy")
@@ -820,13 +1040,349 @@ def resolve_stores(
     return selected
 
 
-def infer_menu_template_profile(workbook) -> MenuTemplateProfile:
-    if DAEJEON_JULY_PROFILE.sheet_name in workbook.sheetnames:
-        return DAEJEON_JULY_PROFILE
-    if DAEGU_JULY_PROFILE.sheet_name in workbook.sheetnames:
-        return DAEGU_JULY_PROFILE
-    raise ValueError("MENU_TEMPLATE_PROFILE_NOT_FOUND")
+def _normalize_menu_template_header(value: object) -> str:
+    if value is None:
+        return ""
 
+    return re.sub(
+        r"\s+",
+        "",
+        str(value),
+    )
+
+
+def _month_sheet_candidates(
+    workbook,
+    month: int | None,
+):
+    """
+    Return target-month worksheets first.
+
+    Supported examples:
+        7월
+        07월
+        07월대전통합본
+        7월 통합본
+
+    Region name is not required.
+    """
+
+    worksheets = list(workbook.worksheets)
+
+    if month is None:
+        return worksheets
+
+    month_tokens = (
+        f"{month}월",
+        f"{month:02d}월",
+    )
+
+    preferred = []
+    fallback = []
+
+    for worksheet in worksheets:
+
+        title = str(
+            worksheet.title or ""
+        ).strip()
+
+        if any(
+            token in title
+            for token in month_tokens
+        ):
+            preferred.append(
+                worksheet
+            )
+        else:
+            fallback.append(
+                worksheet
+            )
+
+    return preferred + fallback
+
+
+def _is_unified_menu_sheet(
+    worksheet,
+    month: int | None,
+) -> bool:
+    """
+    Detect the unified monthly product-data workbook.
+
+    Contract:
+
+        A      store name
+        D      sales / count / ratio label
+        E:Y    direct menu columns
+        Z      other
+        AA     monthly menu total
+        AB     integrated sales
+        AC     previous-year sales
+        AD     YoY
+
+    Supported row layouts:
+
+        sales -> ratio
+
+    and already processed:
+
+        sales -> count -> ratio
+    """
+
+    if worksheet.max_row < 5:
+        return False
+
+    if worksheet.max_column < 30:
+        return False
+
+    def norm(value) -> str:
+
+        if value is None:
+            return ""
+
+        return re.sub(
+            r"\s+",
+            "",
+            str(value),
+        )
+
+
+    # ------------------------------------------------------------------
+    # Unicode-safe contract constants.
+    # ------------------------------------------------------------------
+
+    STORE_NAME = "\uac00\ub9f9\uc810\uba85"
+    FRANCHISE = "\uac00\ub9f9\uc810"
+    STORE = "\ub9e4\uc7a5\uba85"
+
+    OTHER = "\uae30\ud0c0"
+    SALES = "\ub9e4\ucd9c"
+    COUNT = "\uac74\uc218"
+    RATIO = "\ube44\uc728"
+
+    FIVE_ROLLS = "5\uc904"
+    SIKHYE = "\uc2dd\ud61c"
+
+
+    # ------------------------------------------------------------------
+    # A1: store identity header.
+    # ------------------------------------------------------------------
+
+    if norm(
+        worksheet.cell(
+            row=1,
+            column=1,
+        ).value
+    ) not in {
+        STORE_NAME,
+        FRANCHISE,
+        STORE,
+    }:
+        return False
+
+
+    # ------------------------------------------------------------------
+    # Z2: OTHER.
+    # ------------------------------------------------------------------
+
+    if norm(
+        worksheet.cell(
+            row=2,
+            column=26,
+        ).value
+    ) != OTHER:
+        return False
+
+
+    # ------------------------------------------------------------------
+    # AA1: monthly sales total.
+    #
+    # Example:
+    #
+    #     26-year / 07-month / sales
+    # ------------------------------------------------------------------
+
+    aa_header = norm(
+        worksheet.cell(
+            row=1,
+            column=27,
+        ).value
+    )
+
+    if SALES not in aa_header:
+        return False
+
+
+    if month is not None:
+
+        MONTH_CHAR = "\uc6d4"
+
+        month_tokens = (
+            f"{month}{MONTH_CHAR}",
+            f"{month:02d}{MONTH_CHAR}",
+        )
+
+        if not any(
+            token in aa_header
+            for token in month_tokens
+        ):
+            return False
+
+
+    # ------------------------------------------------------------------
+    # Direct-menu boundary.
+    #
+    # E3 = 5 rolls
+    # Y3 = Sikhye
+    # ------------------------------------------------------------------
+
+    if norm(
+        worksheet.cell(
+            row=3,
+            column=5,
+        ).value
+    ) != FIVE_ROLLS:
+        return False
+
+
+    if norm(
+        worksheet.cell(
+            row=3,
+            column=25,
+        ).value
+    ) != SIKHYE:
+        return False
+
+
+    # ------------------------------------------------------------------
+    # Store block.
+    #
+    # Original:
+    #
+    #     D = sales
+    #     D = ratio
+    #
+    # Processed:
+    #
+    #     D = sales
+    #     D = count
+    #     D = ratio
+    # ------------------------------------------------------------------
+
+    for row in range(
+        4,
+        worksheet.max_row + 1,
+    ):
+
+        store = worksheet.cell(
+            row=row,
+            column=1,
+        ).value
+
+        if not store:
+            continue
+
+
+        current_label = norm(
+            worksheet.cell(
+                row=row,
+                column=4,
+            ).value
+        )
+
+        if current_label != SALES:
+            continue
+
+
+        if row + 1 > worksheet.max_row:
+            continue
+
+
+        next_label = norm(
+            worksheet.cell(
+                row=row + 1,
+                column=4,
+            ).value
+        )
+
+
+        # Original workbook.
+        if next_label == RATIO:
+            return True
+
+
+        # Already processed workbook.
+        if (
+            next_label == COUNT
+            and row + 2 <= worksheet.max_row
+            and norm(
+                worksheet.cell(
+                    row=row + 2,
+                    column=4,
+                ).value
+            ) == RATIO
+        ):
+            return True
+
+
+    return False
+
+
+def infer_menu_template_profile(
+    workbook,
+    month: int | None = None,
+) -> MenuTemplateProfile:
+    """
+    Detect a menu workbook.
+
+    Priority:
+
+        1. Unified structure-based profile
+        2. Legacy Daejeon / Daegu profile
+
+    Unified detection is independent of regional naming.
+    """
+
+    # ==================================================================
+    # NEW STANDARD
+    # ==================================================================
+
+    for worksheet in _month_sheet_candidates(
+        workbook,
+        month,
+    ):
+
+        if not _is_unified_menu_sheet(
+            worksheet,
+            month,
+        ):
+            continue
+
+        return replace(
+            DAEJEON_JULY_PROFILE,
+            name="unified_menu",
+            sheet_name=worksheet.title,
+            store_column=1,
+            sales_marker_column=4,
+            menu_start_column=5,
+            direct_menu_end_column=25,
+            other_column=26,
+        )
+
+    # ==================================================================
+    # LEGACY FALLBACK
+    # ==================================================================
+
+    for profile in (
+        DAEJEON_JULY_PROFILE,
+        DAEGU_JULY_PROFILE,
+    ):
+
+        if profile.sheet_name in workbook.sheetnames:
+            return profile
+
+    raise ValueError(
+        "MENU_TEMPLATE_PROFILE_NOT_FOUND"
+    )
 
 def _menu_dry_run_is_pass(plan) -> bool:
     if not plan.residual_match:
@@ -852,5 +1408,9 @@ def _canonical_quantity(mapping_preview, canonical_code: str) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+
 
 
