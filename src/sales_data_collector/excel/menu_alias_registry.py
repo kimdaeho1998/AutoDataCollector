@@ -436,6 +436,7 @@ MENU_ALIAS_REGISTRY: dict[str, dict[str, object]] = {
             "순한맛 떡볶이",
 
             "국물떡볶이(순)",
+            "국물떡볶이(순한맛)",
             "국물 떡볶이(순)",
 
             "국물떡볶이 순",
@@ -509,6 +510,7 @@ MENU_ALIAS_REGISTRY: dict[str, dict[str, object]] = {
             "매운맛 떡볶이",
 
             "국물떡볶이(매)",
+            "국물떡볶이(매운맛)",
             "국물 떡볶이(매)",
 
             "국물떡볶이 매",
@@ -564,6 +566,7 @@ MENU_ALIAS_REGISTRY: dict[str, dict[str, object]] = {
         "aliases": (
 
             "쫄면(순)",
+            "쫄면(순한맛)",
             "쫄면 (순)",
             "쫄면순",
             "쫄면 순",
@@ -590,6 +593,7 @@ MENU_ALIAS_REGISTRY: dict[str, dict[str, object]] = {
         "aliases": (
 
             "쫄면(매)",
+            "쫄면(매운맛)",
             "쫄면 (매)",
             "쫄면매",
             "쫄면 매",
