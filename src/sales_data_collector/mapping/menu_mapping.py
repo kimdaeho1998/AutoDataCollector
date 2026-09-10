@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 import unicodedata
@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Iterable
 
 from ..models import MenuMonthlySalesResult, MenuSalesRecord
+from ..excel.menu_alias_registry import resolve_menu_alias as resolve_f11_menu_alias
 
 
 class MenuRowType(str, Enum):
@@ -123,6 +124,67 @@ AMBIGUOUS: dict[str, tuple[str, ...]] = {
 }
 
 
+
+# ----------------------------------------------------------------------------------------------------
+# F11 Alias Registry -> existing production canonical code compatibility contract.
+#
+# The F11 registry intentionally owns human/menu-name aliases.
+# Production canonical codes remain stable because downstream Excel resolver,
+# aggregation, quantity-row and copy-writer contracts already depend on them.
+# ----------------------------------------------------------------------------------------------------
+
+F11_CANONICAL_COMPATIBILITY: dict[str, str] = {
+    "KIMBAP_5": "KIMBAP_5",
+    "KIMBAP_10": "KIMBAP_10",
+    "KIMBAP_1": "KIMBAP_1",
+
+    "WASABI_CRAB_4": "KIMBAP_WASABI_CRAB_MAYO",
+    "SPICY_JINMI_4": "KIMBAP_SPICY_JINMI",
+    "YUBU_4": "KIMBAP_TOFU_SKIN",
+    "BUL_EOMUK_4": "KIMBAP_SPICY_FISH_CAKE",
+
+    "FISH_CAKE_SOUP": "FISH_CAKE_SOUP",
+
+    "TTEOKBOKKI_MILD": "TTEOKBOKKI_MILD",
+    "TTEOKBOKKI_SPICY": "TTEOKBOKKI_SPICY",
+
+    "JJOLMYEON_MILD": "JJOLMYEON_MILD",
+    "JJOLMYEON_SPICY": "JJOLMYEON_SPICY",
+
+    "SEONBI_UDON": "SEONBI_UDON",
+    "SEONBI_KIMCHI_UDON": "KIMCHI_UDON",
+
+    "UDON": "UDON",
+    "RAMEN": "RAMEN",
+
+    "SRIRACHA": "SAUCE_SRIRACHA_MAYO",
+    "CHEONGYANG": "SAUCE_CHEONGYANG",
+    "MAKHANI_CURRY": "SAUCE_MAKHANI_CURRY",
+    "CHEESE": "SAUCE_CHEESE",
+
+    "SIKHYE": "SIKHYE",
+}
+
+
+def resolve_f11_production_canonical(
+    normalized_name: str,
+) -> str | None:
+    """Resolve an F11 alias to the stable production canonical code."""
+
+    resolved = resolve_f11_menu_alias(
+        normalized_name
+    )
+
+    if resolved is None:
+        return None
+
+    registry_key = resolved.canonical_key
+
+    return F11_CANONICAL_COMPATIBILITY.get(
+        registry_key
+    )
+
+
 def normalize_menu_name(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value)
 
@@ -159,6 +221,20 @@ def classify_menu_record(record: MenuSalesRecord) -> MenuMappingResult:
             canonical_code=None,
             reason="OPTION_ROW",
         )
+    f11_canonical = resolve_f11_production_canonical(
+        normalized
+    )
+
+    if f11_canonical is not None:
+        return MenuMappingResult(
+            record=record,
+            normalized_name=normalized,
+            row_type=MenuRowType.MENU,
+            status=MenuMappingStatus.MAPPED,
+            canonical_code=f11_canonical,
+            reason="F11_ALIAS_REGISTRY",
+        )
+
     if normalized in ALIASES:
         return MenuMappingResult(
             record=record,
@@ -212,3 +288,4 @@ def _aggregate_mapped(mappings: Iterable[MenuMappingResult]) -> tuple[CanonicalM
         )
         for code, data in sorted(by_code.items())
     )
+

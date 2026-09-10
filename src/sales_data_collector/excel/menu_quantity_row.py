@@ -12,10 +12,10 @@ from openpyxl.utils import (
 )
 
 
-DIRECT_START_COLUMN = 7       # G
-DIRECT_END_COLUMN = 27        # AA
-OTHER_COLUMN = 28             # AB
-TOTAL_COLUMN = 29             # AC
+DIRECT_START_COLUMN = 5       # E
+DIRECT_END_COLUMN = 25        # Y
+OTHER_COLUMN = 26             # Z
+TOTAL_COLUMN = 27             # AA
 UNTOUCHED_COLUMN = 30         # AD
 
 SALES_LABEL = "\ub9e4\ucd9c"
@@ -460,14 +460,14 @@ def _validate_preinsert_contract(
     sales_label = _label(
         worksheet.cell(
             row=sales_row,
-            column=6,
+            column=4,
         ).value
     )
 
     ratio_label = _label(
         worksheet.cell(
             row=ratio_row,
-            column=6,
+            column=4,
         ).value
     )
 
@@ -475,7 +475,7 @@ def _validate_preinsert_contract(
 
         raise ValueError(
             "SALES_ROW_LABEL_MISMATCH:"
-            f"F{sales_row}:"
+            f"D{sales_row}:"
             f"{sales_label!r}"
         )
 
@@ -490,7 +490,7 @@ def _validate_preinsert_contract(
 
         raise ValueError(
             "RATIO_ROW_LABEL_MISMATCH:"
-            f"F{ratio_row}:"
+            f"D{ratio_row}:"
             f"{ratio_label!r}"
         )
 
@@ -621,7 +621,7 @@ def insert_quantity_row(
     original_ratio_label = _label(
         worksheet.cell(
             row=original_ratio_row,
-            column=6,
+            column=4,
         ).value
     )
 
@@ -669,10 +669,10 @@ def insert_quantity_row(
     # F = 건수
     worksheet.cell(
         row=quantity_row,
-        column=6,
+        column=4,
     ).value = QUANTITY_LABEL
 
-    # Direct menu columns G:AA.
+    # Direct menu columns E:Y.
     #
     # Explicit 0 is used for canonical menu columns
     # with no quantity, matching the numeric nature
@@ -687,7 +687,38 @@ def insert_quantity_row(
             column=column,
         ).value = 0
 
+    # --------------------------------------------------------------------------
+    # Direct menu quantity write.
+    #
+    # Multiple canonical menu codes may resolve to the same physical Excel
+    # menu column. Never overwrite one quantity with another.
+    #
+    # Aggregate quantities by resolved target column first, then write once.
+    # --------------------------------------------------------------------------
+
+    allowed_direct_columns = {
+        get_column_letter(column)
+        for column in range(
+            DIRECT_START_COLUMN,
+            DIRECT_END_COLUMN + 1,
+        )
+    }
+
+    quantity_by_target_column: dict[str, int] = {}
+
     for cell in plan.cells:
+
+        target_column = str(
+            cell.target_column
+        ).strip().upper()
+
+        if target_column not in allowed_direct_columns:
+
+            raise ValueError(
+                "DIRECT_QUANTITY_TARGET_OUTSIDE_RANGE:"
+                f"CANONICAL={cell.canonical_code}:"
+                f"TARGET={target_column}"
+            )
 
         quantity = int(
             quantity_by_canonical.get(
@@ -696,24 +727,45 @@ def insert_quantity_row(
             )
         )
 
-        target_column = cell.target_column
+        quantity_by_target_column[
+            target_column
+        ] = (
+            quantity_by_target_column.get(
+                target_column,
+                0,
+            )
+            + quantity
+        )
+
+    aggregated_direct_quantity = sum(
+        quantity_by_target_column.values()
+    )
+
+    if aggregated_direct_quantity != direct_quantity:
+
+        raise ValueError(
+            "DIRECT_QUANTITY_TARGET_AGGREGATION_FAILED:"
+            f"TARGETS={aggregated_direct_quantity}:"
+            f"PLAN={direct_quantity}"
+        )
+
+    for target_column, quantity in quantity_by_target_column.items():
 
         worksheet[
             f"{target_column}{quantity_row}"
         ].value = quantity
 
-    # AC = source total quantity.
     worksheet.cell(
         row=quantity_row,
         column=TOTAL_COLUMN,
     ).value = source_total_quantity
 
-    # AB = residual/other quantity.
+    # Z = residual/other quantity.
     ab_formula = (
-        f"=AC{quantity_row}"
-        f"-SUM(G{quantity_row}:AA{quantity_row})"
+        f"={get_column_letter(TOTAL_COLUMN)}{quantity_row}"
+        f"-SUM({get_column_letter(DIRECT_START_COLUMN)}{quantity_row}:"
+        f"{get_column_letter(DIRECT_END_COLUMN)}{quantity_row})"
     )
-
     worksheet.cell(
         row=quantity_row,
         column=OTHER_COLUMN,
@@ -739,21 +791,21 @@ def insert_quantity_row(
     current_sales_label = _label(
         worksheet.cell(
             row=sales_row,
-            column=6,
+            column=4,
         ).value
     )
 
     current_quantity_label = _label(
         worksheet.cell(
             row=quantity_row,
-            column=6,
+            column=4,
         ).value
     )
 
     current_ratio_label = _label(
         worksheet.cell(
             row=ratio_row,
-            column=6,
+            column=4,
         ).value
     )
 
@@ -761,7 +813,7 @@ def insert_quantity_row(
 
         raise ValueError(
             "POSTINSERT_SALES_LABEL_CHANGED:"
-            f"F{sales_row}:"
+            f"D{sales_row}:"
             f"{current_sales_label!r}"
         )
 
@@ -769,7 +821,7 @@ def insert_quantity_row(
 
         raise ValueError(
             "POSTINSERT_QUANTITY_LABEL_INVALID:"
-            f"F{quantity_row}:"
+            f"D{quantity_row}:"
             f"{current_quantity_label!r}"
         )
 
@@ -785,7 +837,7 @@ def insert_quantity_row(
 
         raise ValueError(
             "POSTINSERT_RATIO_LABEL_INVALID:"
-            f"F{ratio_row}:"
+            f"D{ratio_row}:"
             f"{current_ratio_label!r}"
         )
 

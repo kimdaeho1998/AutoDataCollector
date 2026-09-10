@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 from datetime import date
@@ -8,6 +8,10 @@ from enum import Enum
 from bs4 import BeautifulSoup
 
 from .exceptions import ParseError
+from .mapping.menu_category_policy import (
+    MenuCategoryDecision,
+    resolve_menu_category,
+)
 from .models import (
     DailySalesRecord,
     DeliveryChannelRecord,
@@ -129,6 +133,7 @@ class ProductSalesParser:
 
 
 class MenuSalesParser:
+
     """Parse raw menu sales rows without applying canonical menu mapping."""
 
     menu_keywords = ("메뉴", "상품")
@@ -143,8 +148,19 @@ class MenuSalesParser:
         records = self._parse_detail_rows(soup, store_id, store_name, period_start, period_end)
         if not records:
             records = self._parse_tables(soup, store_id, store_name, period_start, period_end)
-        source_total_sales = self._source_total(soup)
-        source_total_quantity = self._source_total_quantity(soup)
+        # MENU_MONTHLY totals are intentionally recomputed from
+        # category-filtered records.
+        #
+        # Never use the page-level product summary here because
+        # that summary may contain delivery-platform sales.
+        source_total_sales = sum(
+            record.sales_amount
+            for record in records
+        )
+        source_total_quantity = sum(
+            (record.sales_quantity or 0)
+            for record in records
+        )
         if not records and self._is_empty_result(soup):
             return MenuMonthlySalesResult(store_id, store_name, period_start, period_end, [], source_total_sales, source_total_quantity)
         if not records:
@@ -187,18 +203,249 @@ class MenuSalesParser:
 
     def _parse_detail_title_children(self, soup: BeautifulSoup, store_id: str, store_name: str, period_start: date, period_end: date) -> list[MenuSalesRecord]:
         records: list[MenuSalesRecord] = []
-        for group in self._unique_nodes(soup.select(self.detail_group_selector)):
-            for item in group.find_all("div", recursive=False):
-                record = self._record_from_menu_item_text(
-                    _text(item),
-                    store_id=store_id,
-                    store_name=store_name,
-                    period_start=period_start,
-                    period_end=period_end,
+
+        # MagicERP product.asp authoritative DOM contract:
+        #
+        #   <li>
+        #       <div class="detail_t">
+        #           ... first <font> = classification/category ...
+        #       </div>
+        #
+        #       <div class="detail_title detail_title2">
+        #           <div>
+        #               <p class="menu_nm">...</p>
+        #               <div class="info">unit qty sales</div>
+        #           </div>
+        #           ...
+        #       </div>
+        #   </li>
+        #
+        # Category belongs to the GROUP, not to menu_name.
+
+        for group in soup.select(
+            ".detail_title"
+        ):
+
+            # ----------------------------------------------------------------------------------------
+            # CATEGORY HEADER
+            # ----------------------------------------------------------------------------------------
+
+            header = group.find_previous_sibling(
+                "div",
+                class_="detail_t",
+            )
+
+            if header is None:
+                # Fail closed:
+                # never place an unclassified source group
+                # into MENU_MONTHLY.
+                continue
+
+            category_node = header.find(
+                "font"
+            )
+
+            if category_node is None:
+                continue
+
+            classification_name = _text(
+                category_node
+            ).strip()
+
+            if not classification_name:
+                continue
+
+            resolution = resolve_menu_category(
+                classification_name
+            )
+
+            if (
+                resolution.decision
+                != MenuCategoryDecision.INCLUDE
+            ):
+                # SOURCE_EXCLUDED:
+                # delivery/platform/set/unknown/etc.
+                continue
+
+
+            # ----------------------------------------------------------------------------------------
+            # PRODUCT ROWS
+            # ----------------------------------------------------------------------------------------
+
+            for item in group.find_all(
+                "div",
+                recursive=False,
+            ):
+
+                menu_node = item.select_one(
+                    "p.menu_nm"
                 )
-                if record is not None:
-                    records.append(record)
+
+                info_node = item.select_one(
+                    "div.info"
+                )
+
+                if (
+                    menu_node is None
+                    or info_node is None
+                ):
+                    continue
+
+
+                menu_name = _text(
+                    menu_node
+                ).strip()
+
+                info_text = _text(
+                    info_node
+                ).strip()
+
+
+                if (
+                    not menu_name
+                    or not info_text
+                ):
+                    continue
+
+
+                if self._looks_like_total(
+                    menu_name
+                ):
+                    continue
+
+
+                # info contract:
+                #
+                #   unit_price
+                #   sales_quantity
+                #   actual_sales_amount
+                #
+                # Important:
+                # actual sales is authoritative.
+                # Do NOT calculate unit_price * quantity.
+
+                numeric_matches = list(
+                    _NUMBER.finditer(
+                        info_text
+                    )
+                )
+
+                if len(
+                    numeric_matches
+                ) < 3:
+                    continue
+
+
+                unit_price_match = (
+                    numeric_matches[-3]
+                )
+
+                quantity_match = (
+                    numeric_matches[-2]
+                )
+
+                sales_match = (
+                    numeric_matches[-1]
+                )
+
+
+                def _number_to_int(
+                    match,
+                ) -> int:
+
+                    return int(
+                        match.group(0)
+                        .replace(",", "")
+                    )
+
+
+                unit_price = _number_to_int(
+                    unit_price_match
+                )
+
+                sales_quantity = _number_to_int(
+                    quantity_match
+                )
+
+                sales_amount = _number_to_int(
+                    sales_match
+                )
+
+
+                records.append(
+                    MenuSalesRecord(
+                        store_id=store_id,
+                        store_name=store_name,
+                        period_start=period_start,
+                        period_end=period_end,
+                        menu_name=menu_name,
+                        sales_amount=sales_amount,
+                        sales_quantity=sales_quantity,
+                        unit_price=unit_price,
+                        classification_name=classification_name,
+                    )
+                )
+
         return records
+    @staticmethod
+    def _split_classification_and_menu_name(
+        prefix: str,
+    ) -> tuple[str, str] | None:
+        """Split flattened MagicERP row prefix using the F8 category policy."""
+
+        compact = " ".join(
+            str(prefix).split()
+        ).strip()
+
+        if not compact:
+            return None
+
+        boundaries = [
+            match.start()
+            for match in re.finditer(
+                r"\s+",
+                compact,
+            )
+        ]
+
+        # Longest valid category prefix wins.
+        for boundary in reversed(
+            boundaries
+        ):
+
+            classification = (
+                compact[:boundary]
+                .strip()
+            )
+
+            menu_name = (
+                compact[boundary:]
+                .strip()
+            )
+
+            if (
+                not classification
+                or not menu_name
+            ):
+                continue
+
+            resolution = (
+                resolve_menu_category(
+                    classification
+                )
+            )
+
+            if (
+                resolution.decision
+                == MenuCategoryDecision.INCLUDE
+            ):
+                return (
+                    classification,
+                    menu_name,
+                )
+
+        return None
+
 
     def _record_from_menu_item_text(
         self,
@@ -216,9 +463,34 @@ class MenuSalesParser:
         if len(numeric_matches) < 3:
             return None
         unit_price_match, quantity_match, sales_match = numeric_matches[-3:]
-        menu_name = text[:unit_price_match.start()].strip()
-        if not menu_name or self._looks_like_total(menu_name):
+
+        prefix = text[:unit_price_match.start()].strip()
+
+        if not prefix:
             return None
+
+        split_result = (
+            self._split_classification_and_menu_name(
+                prefix
+            )
+        )
+
+        if split_result is None:
+            return None
+
+        (
+            classification_name,
+            menu_name,
+        ) = split_result
+
+        if (
+            not menu_name
+            or self._looks_like_total(
+                menu_name
+            )
+        ):
+            return None
+
         return MenuSalesRecord(
             store_id=store_id,
             store_name=store_name,
@@ -228,6 +500,7 @@ class MenuSalesParser:
             sales_quantity=clean_int(quantity_match.group(0)),
             sales_amount=clean_int(sales_match.group(0)),
             unit_price=clean_int(unit_price_match.group(0)),
+            classification_name=classification_name,
         )
 
     @staticmethod

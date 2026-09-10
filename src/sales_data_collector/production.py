@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -43,14 +43,6 @@ class SingleDaySalesCollector:
             store_idx=store.magic_store_id,
             store_name=store.store_name,
         )
-        if (
-            isinstance(today_sales.receipt_count, int)
-            and today_sales.receipt_count < 0
-        ) or (
-            isinstance(today_sales.gross_sales_amount, int)
-            and today_sales.gross_sales_amount < 0
-        ):
-            raise ValueError("SOURCE_VALUE_INVALID")
         return SalesAdminDailyRecord(
             business_date=business_date,
             store_id=store.magic_store_id,

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -125,6 +125,7 @@ class MenuSalesRecord:
     sales_amount: int
     sales_quantity: int | None = None
     unit_price: int | None = None
+    classification_name: str | None = None
 
     @property
     def average_realized_sales(self) -> float | None:

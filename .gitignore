@@ -39,3 +39,15 @@ _patch_backup/
 *.suo
 Thumbs.db
 Desktop.ini
+# ------------------------------------------------------------
+# MagicERP AutoCollector local development artifacts
+# ------------------------------------------------------------
+_build_*/
+_diagnostics/
+diagnostics/
+_temp_*.py
+# Python cache
+# PyInstaller transient output
+# Local logs
+*.log
+release_backup/

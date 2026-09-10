@@ -452,7 +452,7 @@ def run_menu_excel_dry_run(args: argparse.Namespace) -> int:
             f"{quantity_ratio_row}"
         )
         print(
-            f"QUANTITY_LABEL_CELL=F{quantity_row}"
+            f"QUANTITY_LABEL_CELL=D{quantity_row}"
         )
         print("QUANTITY_LABEL=??")
 
@@ -465,15 +465,15 @@ def run_menu_excel_dry_run(args: argparse.Namespace) -> int:
             )
 
         print(
-            f"OTHER_QUANTITY_CELL=AB{quantity_row}"
+            f"OTHER_QUANTITY_CELL=Z{quantity_row}"
         )
         print(
             f"OTHER_QUANTITY_FORMULA="
-            f"=AC{quantity_row}"
-            f"-SUM(G{quantity_row}:AA{quantity_row})"
+            f"=AA{quantity_row}"
+            f"-SUM(E{quantity_row}:Y{quantity_row})"
         )
         print(
-            f"TOTAL_QUANTITY_CELL=AC{quantity_row}"
+            f"TOTAL_QUANTITY_CELL=AA{quantity_row}"
         )
         print(
             "TOTAL_QUANTITY="

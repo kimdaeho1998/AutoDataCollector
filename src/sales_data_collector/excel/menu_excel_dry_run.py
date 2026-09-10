@@ -198,7 +198,7 @@ def _direct_cell_plan(mapping_preview: MenuMappingPreview, worksheet, profile: M
 
 
 def _ac_plan(mapping_preview: MenuMappingPreview, worksheet, store_name: str, row_index: int) -> MenuExcelAcPlan:
-    current_value = worksheet[f"AC{row_index}"].value
+    current_value = worksheet[f"AA{row_index}"].value
     current_formula = current_value if isinstance(current_value, str) and current_value.startswith("=") else None
     proposed = mapping_preview.source.source_total_sales
     if proposed is None:
@@ -209,8 +209,8 @@ def _ac_plan(mapping_preview: MenuMappingPreview, worksheet, store_name: str, ro
     return MenuExcelAcPlan(
         store_name=store_name,
         store_row=row_index,
-        target_column="AC",
-        target_cell=f"AC{row_index}",
+        target_column="AA",
+        target_cell=f"AA{row_index}",
         current_value=current_value,
         proposed_value=proposed,
         current_formula=current_formula,
@@ -220,13 +220,13 @@ def _ac_plan(mapping_preview: MenuMappingPreview, worksheet, store_name: str, ro
 
 
 def _ab_validation(worksheet, store_name: str, row_index: int) -> MenuExcelAbValidation:
-    cell = f"AB{row_index}"
+    cell = f"Z{row_index}"
     formula = worksheet[cell].value
     formula_valid = _is_ab_residual_formula(formula, row_index)
     return MenuExcelAbValidation(
         store_name=store_name,
         store_row=row_index,
-        target_column="AB",
+        target_column="Z",
         target_cell=cell,
         current_formula=formula if isinstance(formula, str) and formula.startswith("=") else None,
         status=CellPlanStatus.VALIDATE_ONLY if formula_valid else CellPlanStatus.BLOCKED,
@@ -248,7 +248,7 @@ def _direct_menu_cell_status(
             and current_value.startswith("=")
         )
         and _numeric_value(current_value) == 0
-        and proposed_value > 0
+        and proposed_value != 0
     ):
         return (
             CellPlanStatus.ZERO_PLACEHOLDER,
@@ -289,18 +289,18 @@ def _is_ab_residual_formula(value, row_index: int) -> bool:
     if not isinstance(value, str) or not value.startswith("="):
         return False
     formula = value.replace(" ", "").replace("$", "").upper()
-    expected = f"=AC{row_index}-SUM(G{row_index}:AA{row_index})"
+    expected = f"=AA{row_index}-SUM(E{row_index}:Y{row_index})"
     return formula == expected
 
 
 def _blocked_ac_plan(store_name: str, row_index: int, reason: str) -> MenuExcelAcPlan:
     row = row_index or 0
-    return MenuExcelAcPlan(store_name, row, "AC", None if row == 0 else f"AC{row}", None, None, None, CellPlanStatus.BLOCKED, reason)
+    return MenuExcelAcPlan(store_name, row, "AA", None if row == 0 else f"AA{row}", None, None, None, CellPlanStatus.BLOCKED, reason)
 
 
 def _blocked_ab_validation(store_name: str, row_index: int, reason: str) -> MenuExcelAbValidation:
     row = row_index or 0
-    return MenuExcelAbValidation(store_name, row, "AB", None if row == 0 else f"AB{row}", None, CellPlanStatus.BLOCKED, False, reason)
+    return MenuExcelAbValidation(store_name, row, "Z", None if row == 0 else f"Z{row}", None, CellPlanStatus.BLOCKED, False, reason)
 
 
 def summarize_other_residual_by_reason(plan: MenuExcelDryRunPlan) -> dict[str, int]:
