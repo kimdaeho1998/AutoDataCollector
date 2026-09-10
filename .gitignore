@@ -51,3 +51,4 @@ _temp_*.py
 # Local logs
 *.log
 release_backup/
+tests/test_product_detail_batch_contract.py
