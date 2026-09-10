@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Protocol, Sequence
 
 from .models import ProductDetailSalesRecord, ProductDetailSalesResult
+from .mapping.store_normalizer import normalize_store_name
 
 
 class ProductDetailClient(Protocol):
@@ -29,6 +30,28 @@ class ProductDetailStore(Protocol):
 
     magic_store_id: str
     store_name: str
+
+
+class ProductDetailDuplicateStoreError(RuntimeError):
+    """Base error for duplicate ERP store resolution failures."""
+
+
+class ProductDetailEmptyAmbiguousStoreError(
+    ProductDetailDuplicateStoreError
+):
+    """No duplicate candidate contains Product Detail rows."""
+
+
+class ProductDetailAmbiguousDataStoreError(
+    ProductDetailDuplicateStoreError
+):
+    """More than one duplicate candidate contains Product Detail rows."""
+
+
+class ProductDetailDuplicateProbeError(
+    ProductDetailDuplicateStoreError
+):
+    """A duplicate candidate could not be safely inspected."""
 
 
 class ProductDetailBatchStatus(str, Enum):
@@ -172,18 +195,31 @@ class ProductDetailBatchCollector:
         if end_date < start_date:
             raise ValueError("PRODUCT_DETAIL_INVALID_PERIOD")
 
+        resolved_stores, precollected = (
+            self._resolve_duplicate_stores(
+                stores=stores,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        )
+
         items: list[ProductDetailBatchItem] = []
 
-        for store in stores:
+        for store in resolved_stores:
             try:
-                result = self.client.get_product_detail_sales(
-                    start_date=start_date,
-                    end_date=end_date,
-                    brand_idx=self.brand_idx,
-                    brand_name=self.brand_name,
-                    store_idx=store.magic_store_id,
-                    store_name=store.store_name,
+                result = precollected.get(
+                    store.magic_store_id
                 )
+
+                if result is None:
+                    result = self.client.get_product_detail_sales(
+                        start_date=start_date,
+                        end_date=end_date,
+                        brand_idx=self.brand_idx,
+                        brand_name=self.brand_name,
+                        store_idx=store.magic_store_id,
+                        store_name=store.store_name,
+                    )
 
                 status = (
                     ProductDetailBatchStatus.SUCCESS
@@ -222,6 +258,174 @@ class ProductDetailBatchCollector:
             period_end=end_date,
             items=tuple(items),
         )
+
+    def _resolve_duplicate_stores(
+        self,
+        *,
+        stores: Sequence[ProductDetailStore],
+        start_date: date,
+        end_date: date,
+    ) -> tuple[
+        list[ProductDetailStore],
+        dict[str, ProductDetailSalesResult],
+    ]:
+        """
+        Resolve only the confirmed duplicate ERP identity for 서정리역점.
+
+        General store matching remains unchanged.
+
+        Resolution contract:
+        - one 서정리역점 candidate: use normally.
+        - multiple candidates:
+          * exactly one candidate with parsed raw product rows -> select.
+          * zero candidates with rows -> fail closed.
+          * multiple candidates with rows -> fail closed.
+          * ordinary probe error -> fail closed.
+        - values themselves are never used as the data-presence test.
+          Zero and negative quantity/sales remain valid.
+        """
+
+        store_list = list(stores)
+
+        seojeongri_candidates = [
+            store
+            for store in store_list
+            if _is_seojeongri_store(
+                store.store_name
+            )
+        ]
+
+        if len(seojeongri_candidates) <= 1:
+            return store_list, {}
+
+        data_candidates: list[
+            tuple[
+                ProductDetailStore,
+                ProductDetailSalesResult,
+            ]
+        ] = []
+
+        for candidate in seojeongri_candidates:
+            try:
+                result = self.client.get_product_detail_sales(
+                    start_date=start_date,
+                    end_date=end_date,
+                    brand_idx=self.brand_idx,
+                    brand_name=self.brand_name,
+                    store_idx=candidate.magic_store_id,
+                    store_name=candidate.store_name,
+                )
+
+            except Exception as exc:
+                if _is_fatal_access_error(exc):
+                    raise
+
+                raise ProductDetailDuplicateProbeError(
+                    "PRODUCT_DETAIL_DUPLICATE_PROBE_ERROR: "
+                    f"store_id={candidate.magic_store_id}; "
+                    f"reason={exc}"
+                ) from exc
+
+            # Source-data presence is based only on parsed rows.
+            #
+            # Do NOT test quantity/sales > 0:
+            # signed and zero-valued source rows are valid.
+            if result.records:
+                data_candidates.append(
+                    (
+                        candidate,
+                        result,
+                    )
+                )
+
+        if not data_candidates:
+            raise ProductDetailEmptyAmbiguousStoreError(
+                "PRODUCT_DETAIL_EMPTY_AMBIGUOUS_STORE: "
+                "서정리역점"
+            )
+
+        if len(data_candidates) > 1:
+            ids = ",".join(
+                candidate.magic_store_id
+                for candidate, _ in data_candidates
+            )
+
+            raise ProductDetailAmbiguousDataStoreError(
+                "PRODUCT_DETAIL_AMBIGUOUS_DATA_STORE: "
+                f"서정리역점; ids={ids}"
+            )
+
+        selected_store, selected_result = (
+            data_candidates[0]
+        )
+
+        resolved: list[ProductDetailStore] = []
+
+        seojeongri_added = False
+
+        for store in store_list:
+            if not _is_seojeongri_store(
+                store.store_name
+            ):
+                resolved.append(store)
+                continue
+
+            if (
+                not seojeongri_added
+                and store.magic_store_id
+                == selected_store.magic_store_id
+            ):
+                resolved.append(store)
+                seojeongri_added = True
+
+        return (
+            resolved,
+            {
+                selected_store.magic_store_id:
+                    selected_result
+            },
+        )
+
+
+def _is_seojeongri_store(store_name: str) -> bool:
+    """
+    Return True only for the confirmed duplicate ERP identity
+    '서정리역점'.
+
+    The existing project normalizer is consulted first, but this
+    Product Detail boundary also tolerates the MagicERP brand prefix
+    still being present.
+
+    No generic suffix such as (신), (전), 1호점, 직영 is removed.
+    """
+
+    normalized = normalize_store_name(
+        store_name
+    )
+
+    candidates = {
+        " ".join(str(normalized).split()),
+        " ".join(str(store_name).split()),
+    }
+
+    brand_prefix = "선비꼬마김밥"
+
+    canonical_names: set[str] = set()
+
+    for value in candidates:
+        value = value.strip()
+
+        if value.startswith(brand_prefix):
+            value = value[len(brand_prefix):].strip()
+
+        canonical_names.add(
+            "".join(value.split())
+        )
+
+    return canonical_names == {"서정리역점"} or (
+        "서정리역점" in canonical_names
+    )
+
 
 
 def _is_fatal_access_error(exc: Exception) -> bool:
