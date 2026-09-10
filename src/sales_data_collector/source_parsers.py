@@ -20,6 +20,8 @@ from .models import (
     MenuSalesRecord,
     MonthlySalesRecord,
     PeriodSalesResult,
+    ProductDetailSalesRecord,
+    ProductDetailSalesResult,
     ProductSalesResult,
     TodayStoreSalesResult,
 )
@@ -130,6 +132,357 @@ class ProductSalesParser:
         if count is None or sales is None:
             raise ParseError("product summary is missing")
         return ProductSalesResult(product_count=count, sales_amount=sales)
+
+
+class ProductDetailSalesParser:
+    """
+    Parse RAW product.asp detail rows.
+
+    Important:
+    - This parser does NOT use resolve_menu_category().
+    - It does NOT apply the MENU_MONTHLY whitelist.
+    - It preserves raw classification/category text when present.
+    - Negative quantity/sales values remain signed.
+    """
+
+    empty_keywords = (
+        "조회된 데이터가 없습니다",
+        "데이터가 없습니다",
+        "검색 결과가 없습니다",
+    )
+
+    def parse(
+        self,
+        html: str,
+        *,
+        store_id: str,
+        store_name: str,
+        period_start: date,
+        period_end: date,
+    ) -> ProductDetailSalesResult:
+        soup = BeautifulSoup(html, "html.parser")
+
+        records = self._parse_product_groups(
+            soup,
+            store_id,
+            store_name,
+            period_start,
+            period_end,
+        )
+
+        if not records:
+            records = self._parse_tables(
+                soup,
+                store_id,
+                store_name,
+                period_start,
+                period_end,
+            )
+
+        if not records:
+            if self._is_empty_result(soup):
+                return ProductDetailSalesResult(
+                    store_id=store_id,
+                    store_name=store_name,
+                    period_start=period_start,
+                    period_end=period_end,
+                    records=[],
+                    source_total_sales=0,
+                    source_total_quantity=0,
+                )
+
+            raise ParseError(
+                "product detail response contains no parseable product rows"
+            )
+
+        return ProductDetailSalesResult(
+            store_id=store_id,
+            store_name=store_name,
+            period_start=period_start,
+            period_end=period_end,
+            records=records,
+            source_total_sales=sum(
+                record.sales_amount
+                for record in records
+            ),
+            source_total_quantity=sum(
+                record.sales_quantity or 0
+                for record in records
+            ),
+        )
+
+    def _parse_product_groups(
+        self,
+        soup: BeautifulSoup,
+        store_id: str,
+        store_name: str,
+        period_start: date,
+        period_end: date,
+    ) -> list[ProductDetailSalesRecord]:
+
+        records: list[ProductDetailSalesRecord] = []
+
+        for group in soup.select(
+            ".detail_title.detail_title2, "
+            ".detail .detail_title, "
+            ".detail2 .detail_title, "
+            ".detail3 .detail_title"
+        ):
+            classification_name = self._classification_name(group)
+
+            children = [
+                child
+                for child in group.find_all(
+                    ["div", "li"],
+                    recursive=False,
+                )
+            ]
+
+            if children:
+                for child in children:
+                    record = self._parse_product_text(
+                        _text(child),
+                        store_id=store_id,
+                        store_name=store_name,
+                        period_start=period_start,
+                        period_end=period_end,
+                        classification_name=classification_name,
+                    )
+
+                    if record is not None:
+                        records.append(record)
+
+                if records:
+                    continue
+
+            record = self._parse_product_text(
+                _text(group),
+                store_id=store_id,
+                store_name=store_name,
+                period_start=period_start,
+                period_end=period_end,
+                classification_name=classification_name,
+            )
+
+            if record is not None:
+                records.append(record)
+
+        return records
+
+    @staticmethod
+    def _classification_name(group) -> str | None:
+        header = group.find_previous_sibling(
+            "div",
+            class_="detail_t",
+        )
+
+        if header is None:
+            return None
+
+        font = header.find("font")
+
+        value = _text(font) if font is not None else _text(header)
+
+        return value.strip() or None
+
+    @staticmethod
+    def _parse_product_text(
+        text: str,
+        *,
+        store_id: str,
+        store_name: str,
+        period_start: date,
+        period_end: date,
+        classification_name: str | None,
+    ) -> ProductDetailSalesRecord | None:
+
+        text = " ".join(text.split())
+
+        if not text:
+            return None
+
+        matches = list(_NUMBER.finditer(text))
+
+        if len(matches) < 3:
+            return None
+
+        unit_price_match, quantity_match, sales_match = matches[-3:]
+
+        product_name = text[:unit_price_match.start()].strip()
+
+        if not product_name:
+            return None
+
+        if product_name.replace(" ", "") in {
+            "합계",
+            "총합계",
+            "매출합계",
+            "총매출",
+        }:
+            return None
+
+        return ProductDetailSalesRecord(
+            store_id=store_id,
+            store_name=store_name,
+            period_start=period_start,
+            period_end=period_end,
+            product_name=product_name,
+            sales_quantity=clean_int(
+                quantity_match.group(0)
+            ),
+            sales_amount=clean_int(
+                sales_match.group(0)
+            ),
+            unit_price=clean_int(
+                unit_price_match.group(0)
+            ),
+            classification_name=classification_name,
+        )
+
+    def _parse_tables(
+        self,
+        soup: BeautifulSoup,
+        store_id: str,
+        store_name: str,
+        period_start: date,
+        period_end: date,
+    ) -> list[ProductDetailSalesRecord]:
+
+        records: list[ProductDetailSalesRecord] = []
+
+        for table in soup.find_all("table"):
+            rows = table.find_all("tr")
+
+            if len(rows) < 2:
+                continue
+
+            headers = [
+                _text(cell).replace(" ", "")
+                for cell in rows[0].find_all(["th", "td"])
+            ]
+
+            product_idx = self._find_header(
+                headers,
+                ("상품", "상품명", "메뉴", "메뉴명"),
+            )
+            quantity_idx = self._find_header(
+                headers,
+                ("수량", "건수", "개수"),
+            )
+            amount_idx = self._find_header(
+                headers,
+                ("매출", "판매금액", "매출금액", "금액", "합계"),
+            )
+            unit_price_idx = self._find_header(
+                headers,
+                ("단가", "판매단가"),
+            )
+            classification_idx = self._find_header(
+                headers,
+                ("분류", "분류명", "카테고리"),
+            )
+
+            if product_idx is None or amount_idx is None:
+                continue
+
+            for row in rows[1:]:
+                cells = [
+                    _text(cell)
+                    for cell in row.find_all(["th", "td"])
+                ]
+
+                if max(product_idx, amount_idx) >= len(cells):
+                    continue
+
+                product_name = cells[product_idx].strip()
+
+                if not product_name:
+                    continue
+
+                if product_name.replace(" ", "") in {
+                    "합계",
+                    "총합계",
+                    "매출합계",
+                    "총매출",
+                }:
+                    continue
+
+                if not _NUMBER.search(cells[amount_idx]):
+                    continue
+
+                quantity = (
+                    clean_int(cells[quantity_idx])
+                    if (
+                        quantity_idx is not None
+                        and quantity_idx < len(cells)
+                        and _NUMBER.search(cells[quantity_idx])
+                    )
+                    else None
+                )
+
+                unit_price = (
+                    clean_int(cells[unit_price_idx])
+                    if (
+                        unit_price_idx is not None
+                        and unit_price_idx < len(cells)
+                        and _NUMBER.search(cells[unit_price_idx])
+                    )
+                    else None
+                )
+
+                classification_name = (
+                    cells[classification_idx].strip() or None
+                    if (
+                        classification_idx is not None
+                        and classification_idx < len(cells)
+                    )
+                    else None
+                )
+
+                records.append(
+                    ProductDetailSalesRecord(
+                        store_id=store_id,
+                        store_name=store_name,
+                        period_start=period_start,
+                        period_end=period_end,
+                        product_name=product_name,
+                        sales_quantity=quantity,
+                        sales_amount=clean_int(
+                            cells[amount_idx]
+                        ),
+                        unit_price=unit_price,
+                        classification_name=classification_name,
+                    )
+                )
+
+        return records
+
+    @staticmethod
+    def _find_header(
+        headers: list[str],
+        keywords: tuple[str, ...],
+    ) -> int | None:
+        normalized_keywords = tuple(
+            value.replace(" ", "")
+            for value in keywords
+        )
+
+        for index, value in enumerate(headers):
+            if any(
+                keyword in value
+                for keyword in normalized_keywords
+            ):
+                return index
+
+        return None
+
+    def _is_empty_result(self, soup: BeautifulSoup) -> bool:
+        text = _text(soup)
+
+        return any(
+            keyword in text
+            for keyword in self.empty_keywords
+        )
 
 
 class MenuSalesParser:

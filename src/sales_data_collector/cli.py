@@ -944,12 +944,132 @@ def run_store_batch_production(args: argparse.Namespace, *, write: bool) -> int:
         if not stores:
             raise ValueError("STORE_NOT_FOUND")
         if args.store_name and not args.store_idx and len(stores) > 1:
-            raise ValueError("AMBIGUOUS_STORE_NAME")
+            requested_names = {
+                normalize_store_name(value)
+                for value in args.store_name
+                if value.strip()
+            }
+            if requested_names != {"서정리역점"}:
+                raise ValueError("AMBIGUOUS_STORE_NAME")
         print(f"[INFO] Selected {len(stores)} of {len(available_stores)} stores")
         collector = SingleDaySalesCollector(client, brand_idx=args.brand_idx, brand_name=args.brand_name)
         previewer = SalesAdminDryRun(template)
         for business_date in business_dates:
-            for store in stores:
+            stores_for_date = stores
+            precollected_records: dict[str, SalesAdminDailyRecord] = {}
+
+            normalized_store_names = {
+                normalize_store_name(store.store_name)
+                for store in stores
+            }
+
+            if (
+                len(stores) > 1
+                and normalized_store_names == {"서정리역점"}
+            ):
+                data_candidates: list[
+                    tuple[Store, SalesAdminDailyRecord]
+                ] = []
+
+                candidate_errors: list[str] = []
+
+                print(
+                    f"[INFO] Resolving duplicate ERP store by source data "
+                    f"date={business_date.isoformat()} "
+                    f"store=서정리역점 "
+                    f"candidates={len(stores)}"
+                )
+
+                for candidate in stores:
+                    try:
+                        candidate_record = collector.collect(
+                            store=candidate,
+                            business_date=business_date,
+                        )
+
+                        data_candidates.append(
+                            (
+                                candidate,
+                                candidate_record,
+                            )
+                        )
+
+                        print(
+                            f"[DUPLICATE PROBE] "
+                            f"date={business_date.isoformat()} "
+                            f"store={candidate.store_name} "
+                            f"store_id={candidate.magic_store_id} "
+                            f"status=DATA "
+                            f"receipt={candidate_record.receipt_count} "
+                            f"gross={candidate_record.gross_sales_amount}"
+                        )
+
+                    except Exception as exc:
+                        if str(exc) == "UNMATCHED":
+                            print(
+                                f"[DUPLICATE PROBE] "
+                                f"date={business_date.isoformat()} "
+                                f"store={candidate.store_name} "
+                                f"store_id={candidate.magic_store_id} "
+                                f"status=NO_DATA"
+                            )
+                            continue
+
+                        candidate_errors.append(
+                            f"{candidate.magic_store_id}:{exc}"
+                        )
+
+                        print(
+                            f"[DUPLICATE PROBE] "
+                            f"date={business_date.isoformat()} "
+                            f"store={candidate.store_name} "
+                            f"store_id={candidate.magic_store_id} "
+                            f"status=ERROR "
+                            f"reason={exc}"
+                        )
+
+                if candidate_errors:
+                    raise RuntimeError(
+                        "DUPLICATE_STORE_PROBE_ERROR: "
+                        + " | ".join(candidate_errors)
+                    )
+
+                if len(data_candidates) == 0:
+                    raise RuntimeError(
+                        "EMPTY_AMBIGUOUS_STORE"
+                    )
+
+                if len(data_candidates) > 1:
+                    ids = ", ".join(
+                        candidate.magic_store_id
+                        for candidate, _ in data_candidates
+                    )
+
+                    raise RuntimeError(
+                        f"AMBIGUOUS_DATA_STORE: {ids}"
+                    )
+
+                selected_store, selected_record = (
+                    data_candidates[0]
+                )
+
+                stores_for_date = [
+                    selected_store
+                ]
+
+                precollected_records[
+                    selected_store.magic_store_id
+                ] = selected_record
+
+                print(
+                    f"[DUPLICATE RESOLVED] "
+                    f"date={business_date.isoformat()} "
+                    f"store=서정리역점 "
+                    f"selected_store_id="
+                    f"{selected_store.magic_store_id}"
+                )
+
+            for store in stores_for_date:
                 try:
                     category = resolver.store_category(business_date, store.magic_store_id, store.store_name)
                     if resolver.is_inactive_category(category):
@@ -964,7 +1084,14 @@ def run_store_batch_production(args: argparse.Namespace, *, write: bool) -> int:
                             gross_sales_amount="-",
                         )
                     else:
-                        record = collector.collect(store=store, business_date=business_date)
+                        record = precollected_records.get(
+                            store.magic_store_id
+                        )
+                        if record is None:
+                            record = collector.collect(
+                                store=store,
+                                business_date=business_date,
+                            )
                     preview = previewer.preview(record)
                     cells = ", ".join(change.cell for change in preview.changes)
                     source = "INACTIVE" if resolver.is_inactive_category(category) else "ERP"

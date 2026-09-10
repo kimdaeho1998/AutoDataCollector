@@ -15,12 +15,13 @@ from .models import (
     MenuMonthlySalesResult,
     MonthlySalesRecord,
     PeriodSalesResult,
+    ProductDetailSalesResult,
     ProductSalesResult,
     Store,
     TodayStoreSalesResult,
 )
 from .parser import ServiceSalesParser
-from .source_parsers import DailySalesParser, MenuSalesParser, MonthlySalesParser, PeriodSalesParser, ProductSalesParser, TodayStoreSalesParser
+from .source_parsers import DailySalesParser, MenuSalesParser, MonthlySalesParser, PeriodSalesParser, ProductDetailSalesParser, ProductSalesParser, TodayStoreSalesParser
 from .utils import format_ymd
 
 
@@ -188,6 +189,47 @@ class ServiceClient:
         )
         self._ensure_ok(response)
         return ProductSalesParser().parse(response.text)
+
+    def get_product_detail_sales(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        brand_idx: str,
+        brand_name: str,
+        store_idx: str,
+        store_name: str,
+    ) -> ProductDetailSalesResult:
+        """Return raw product.asp detail rows without menu classification filtering."""
+        response = self.session.post(
+            self._url(self._require_path("product_sales_path")),
+            data=self._store_payload(
+                brand_idx,
+                brand_name,
+                store_idx,
+                store_name,
+                startDate=format_ymd(start_date),
+                endDate=format_ymd(end_date),
+                storeidx_str="",
+                usFranOrStore="1",
+            ),
+            timeout=self.timeout,
+        )
+        self._ensure_ok(response)
+
+        try:
+            return ProductDetailSalesParser().parse(
+                response.text,
+                store_id=store_idx,
+                store_name=store_name,
+                period_start=start_date,
+                period_end=end_date,
+            )
+        except ParseError as exc:
+            raise ParseError(
+                f"{exc}; "
+                f"response={self._safe_menu_response_shape(response.text)}"
+            ) from exc
 
     def get_menu_monthly_sales(self, *, start_date: date, end_date: date, brand_idx: str, brand_name: str, store_idx: str, store_name: str) -> MenuMonthlySalesResult:
         response = self.session.post(

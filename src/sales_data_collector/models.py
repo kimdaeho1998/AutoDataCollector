@@ -116,6 +116,34 @@ class ProductSalesResult:
 
 
 @dataclass(frozen=True)
+class ProductDetailSalesRecord:
+    """One raw product row from MagicERP product.asp."""
+
+    store_id: str
+    store_name: str
+    period_start: date
+    period_end: date
+    product_name: str
+    sales_quantity: int | None
+    sales_amount: int
+    unit_price: int | None = None
+    classification_name: str | None = None
+
+
+@dataclass(frozen=True)
+class ProductDetailSalesResult:
+    """Raw product.asp detail result without menu classification filtering."""
+
+    store_id: str
+    store_name: str
+    period_start: date
+    period_end: date
+    records: list[ProductDetailSalesRecord]
+    source_total_sales: int
+    source_total_quantity: int
+
+
+@dataclass(frozen=True)
 class MenuSalesRecord:
     store_id: str
     store_name: str
