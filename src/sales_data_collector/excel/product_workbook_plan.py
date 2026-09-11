@@ -3,7 +3,19 @@
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
-from .product_projection import ProductProjectionResult
+from .product_projection import (
+    PRODUCT_CANONICAL_COLUMNS,
+    ProductProjectionResult,
+)
+from .product_workbook_policy import (
+    ProductWorkbookDisposition,
+    classify_product_workbook_unmapped_records,
+    review_required_count,
+    workbook_excluded_quantity,
+    workbook_excluded_sales,
+    workbook_residual_quantity,
+    workbook_residual_sales,
+)
 
 
 PRODUCT_FIRST_COLUMN = "E"
@@ -72,7 +84,7 @@ class ProductWorkbookPlan:
     cells: tuple[ProductWorkbookCellPlan, ...]
 
     source_total_sales: int
-    source_total_quantity: int
+    source_total_quantity: int | None
 
     mapped_sales_total: int
     mapped_quantity_total: int | None
@@ -274,7 +286,8 @@ def build_product_workbook_plan(
         Direct canonical Product values.
 
     AA
-        Raw Product source total.
+        Product Workbook eligible total:
+        canonical E:Y + eligible residual represented by Z.
 
     Z
         Not written here.
@@ -302,10 +315,37 @@ def build_product_workbook_plan(
 
     seen_columns: set[str] = set()
 
-    for item in projection.mapped:
+    # R15-D4 Product Workbook output contract.
+    #
+    # ProductProjectionResult remains sparse and represents only
+    # canonical products actually observed in ERP Product Detail.
+    #
+    # Product Workbook E:Y is a fixed 21-column structure.
+    #
+    # After a successful Product Detail collection:
+    #
+    # - canonical present:
+    #     preserve actual signed sales and quantity.
+    #
+    # - canonical absent:
+    #     sales = 0
+    #     quantity = 0
+    #
+    # - canonical present but quantity is None:
+    #     preserve None and fail closed downstream.
+    #
+    # Collection/parser errors do not reach this plan builder
+    # and therefore are never converted to zero.
+    projection_by_key = (
+        projection.by_canonical_key()
+    )
+
+    for canonical_key, physical_column in (
+        PRODUCT_CANONICAL_COLUMNS.items()
+    ):
 
         column = str(
-            item.column_letter
+            physical_column
         ).strip().upper()
 
         if not (
@@ -315,7 +355,7 @@ def build_product_workbook_plan(
         ):
             raise ValueError(
                 "PRODUCT_WORKBOOK_COLUMN_OUT_OF_RANGE:"
-                f"{item.canonical_key}:"
+                f"{canonical_key}:"
                 f"{column}"
             )
 
@@ -325,28 +365,80 @@ def build_product_workbook_plan(
                 f"{column}"
             )
 
-        seen_columns.add(column)
-
-        proposed_sales = int(
-            item.sales_amount
+        seen_columns.add(
+            column
         )
 
-        proposed_quantity = (
-            None
-            if item.sales_quantity is None
-            else int(item.sales_quantity)
+        item = projection_by_key.get(
+            canonical_key
         )
 
-        mapped_sales_total += proposed_sales
+        if item is None:
+
+            proposed_sales = 0
+            proposed_quantity = 0
+
+            source_names: tuple[
+                str,
+                ...
+            ] = ()
+
+            record_count = 0
+            quantity_missing_count = 0
+
+        else:
+
+            item_column = str(
+                item.column_letter
+            ).strip().upper()
+
+            if item_column != column:
+                raise ValueError(
+                    "PRODUCT_WORKBOOK_CANONICAL_COLUMN_MISMATCH:"
+                    f"{canonical_key}:"
+                    f"{item_column}:"
+                    f"{column}"
+                )
+
+            proposed_sales = int(
+                item.sales_amount
+            )
+
+            proposed_quantity = (
+                None
+                if item.sales_quantity is None
+                else int(
+                    item.sales_quantity
+                )
+            )
+
+            source_names = tuple(
+                item.source_names
+            )
+
+            record_count = int(
+                item.record_count
+            )
+
+            quantity_missing_count = int(
+                item.quantity_missing_count
+            )
+
+        mapped_sales_total += (
+            proposed_sales
+        )
 
         if proposed_quantity is None:
+
             mapped_quantity_complete = False
 
             warnings.append(
                 "MISSING_MAPPED_PRODUCT_QUANTITY:"
-                f"{item.canonical_key}"
+                f"{canonical_key}"
             )
+
         else:
+
             mapped_quantity_total += (
                 proposed_quantity
             )
@@ -354,7 +446,7 @@ def build_product_workbook_plan(
         cells.append(
             ProductWorkbookCellPlan(
                 canonical_key=(
-                    item.canonical_key
+                    canonical_key
                 ),
                 column_letter=column,
                 sales_cell=(
@@ -363,22 +455,28 @@ def build_product_workbook_plan(
                 quantity_cell=(
                     f"{column}{rows.quantity_row}"
                 ),
-                proposed_sales=proposed_sales,
-                proposed_quantity=proposed_quantity,
-                source_names=tuple(
-                    item.source_names
+                proposed_sales=(
+                    proposed_sales
                 ),
-                record_count=int(
-                    item.record_count
+                proposed_quantity=(
+                    proposed_quantity
                 ),
-                quantity_missing_count=int(
-                    item.quantity_missing_count
+                source_names=(
+                    source_names
+                ),
+                record_count=(
+                    record_count
+                ),
+                quantity_missing_count=(
+                    quantity_missing_count
                 ),
             )
         )
 
     cells.sort(
-        key=lambda item: item.column_letter
+        key=lambda item: (
+            item.column_letter
+        )
     )
 
     unmapped = tuple(
@@ -416,20 +514,100 @@ def build_product_workbook_plan(
         else None
     )
 
-    residual_quantity = (
-        int(source_total_quantity)
-        - mapped_quantity_total
-        if mapped_quantity_complete
+    workbook_dispositions = (
+        classify_product_workbook_unmapped_records(
+            projection.unmapped
+        )
+    )
+
+    residual_sales = workbook_residual_sales(
+        workbook_dispositions
+    )
+
+    residual_quantity = workbook_residual_quantity(
+        workbook_dispositions
+    )
+
+    excluded_sales = workbook_excluded_sales(
+        workbook_dispositions
+    )
+
+    excluded_quantity = workbook_excluded_quantity(
+        workbook_dispositions
+    )
+
+    review_count = review_required_count(
+        workbook_dispositions
+    )
+
+    # Fail closed:
+    # unknown Product classifications must never be silently
+    # included in AA or Z.
+    if review_count:
+        review_names = sorted(
+            {
+                item.source.record.classification_name
+                or "<EMPTY>"
+                for item in workbook_dispositions
+                if (
+                    item.disposition
+                    == ProductWorkbookDisposition.REVIEW_REQUIRED
+                )
+            }
+        )
+
+        raise ValueError(
+            "PRODUCT_WORKBOOK_REVIEW_REQUIRED:"
+            + ",".join(review_names)
+        )
+
+    # Workbook total differs from raw product.asp total.
+    #
+    # AA = canonical E:Y + eligible residual represented by Z.
+    workbook_total_sales = (
+        mapped_sales_total
+        + residual_sales
+    )
+
+    workbook_total_quantity = (
+        mapped_quantity_total
+        + residual_quantity
+        if (
+            mapped_quantity_complete
+            and residual_quantity is not None
+        )
         else None
     )
 
-    # Signed source values are valid.
-    # Therefore residual sales/quantity are NOT rejected merely
-    # because they are negative.
-    residual_sales = (
-        int(source_total_sales)
-        - mapped_sales_total
+    # Raw ERP totals remain authoritative for reconciliation.
+    raw_reconciled_sales = (
+        workbook_total_sales
+        + excluded_sales
     )
+
+    if raw_reconciled_sales != int(source_total_sales):
+        raise ValueError(
+            "PRODUCT_WORKBOOK_RAW_SALES_RECONCILIATION_FAILED:"
+            f"{raw_reconciled_sales}"
+            f"!="
+            f"{int(source_total_sales)}"
+        )
+
+    if (
+        workbook_total_quantity is not None
+        and excluded_quantity is not None
+        and (
+            workbook_total_quantity
+            + excluded_quantity
+            != int(source_total_quantity)
+        )
+    ):
+        raise ValueError(
+            "PRODUCT_WORKBOOK_RAW_QUANTITY_RECONCILIATION_FAILED:"
+            f"{workbook_total_quantity + excluded_quantity}"
+            f"!="
+            f"{int(source_total_quantity)}"
+        )
 
     return ProductWorkbookPlan(
         store_name=rows.store_name,
@@ -438,10 +616,12 @@ def build_product_workbook_plan(
         ratio_row=rows.ratio_row,
         cells=tuple(cells),
         source_total_sales=int(
-            source_total_sales
+            workbook_total_sales
         ),
-        source_total_quantity=int(
-            source_total_quantity
+        source_total_quantity=(
+            int(workbook_total_quantity)
+            if workbook_total_quantity is not None
+            else None
         ),
         mapped_sales_total=(
             mapped_sales_total

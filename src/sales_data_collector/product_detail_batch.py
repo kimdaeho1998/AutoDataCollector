@@ -320,6 +320,14 @@ class ProductDetailBatchCollector:
                 if _is_fatal_access_error(exc):
                     raise
 
+                if _is_empty_product_detail_probe_error(exc):
+                    # Valid MagicERP Product Detail page with no
+                    # Product rows for this duplicate candidate.
+                    #
+                    # Treat this candidate as "no data", not as
+                    # a probe failure. Do not synthesize zero values.
+                    continue
+
                 raise ProductDetailDuplicateProbeError(
                     "PRODUCT_DETAIL_DUPLICATE_PROBE_ERROR: "
                     f"store_id={candidate.magic_store_id}; "
@@ -426,6 +434,37 @@ def _is_seojeongri_store(store_name: str) -> bool:
         "서정리역점" in canonical_names
     )
 
+
+
+
+def _is_empty_product_detail_probe_error(
+    exc: Exception,
+) -> bool:
+    """
+    Return True only for the confirmed MagicERP Product Detail
+    no-data response shape encountered while resolving a duplicate store.
+
+    This helper is intentionally narrow.
+
+    It must NOT convert arbitrary ParseError/malformed HTML into EMPTY.
+    """
+
+    message = str(exc)
+
+    required_fragments = (
+        "product detail response contains no parseable product rows",
+        "title='::::MagicERP::::'",
+        "table_count=0",
+        "'startDate'",
+        "'endDate'",
+        "'brandidx'",
+        "'storeidx'",
+    )
+
+    return all(
+        fragment in message
+        for fragment in required_fragments
+    )
 
 
 def _is_fatal_access_error(exc: Exception) -> bool:

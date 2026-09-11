@@ -476,15 +476,71 @@ class ProductDetailSalesParser:
 
         return None
 
-    def _is_empty_result(self, soup: BeautifulSoup) -> bool:
+    @classmethod
+    def _is_empty_result(cls, soup: BeautifulSoup) -> bool:
         text = _text(soup)
 
-        return any(
+        if any(
             keyword in text
-            for keyword in self.empty_keywords
+            for keyword in cls.empty_keywords
+        ):
+            return True
+
+        # MAGICERP_PRODUCT_EMPTY_SHAPE
+        # MagicERP product.asp can return a valid search page with
+        # no result rows and without an explicit empty-result message.
+        # Recognize only the confirmed narrow page shape.
+        title = (
+            _text(soup.title)
+            if soup.title is not None
+            else ""
         )
 
+        if title.strip() != "::::MagicERP::::":
+            return False
 
+        if soup.find_all("table"):
+            return False
+
+        if soup.select(
+            ".detail_title.detail_title2, "
+            ".detail .detail_title, "
+            ".detail2 .detail_title, "
+            ".detail3 .detail_title"
+        ):
+            return False
+
+        required_inputs = {
+            "startDate",
+            "endDate",
+            "brandidx",
+            "storeidx",
+        }
+
+        input_names = {
+            str(node.get("name", "")).strip()
+            for node in soup.find_all("input")
+            if str(node.get("name", "")).strip()
+        }
+
+        if not required_inputs.issubset(input_names):
+            return False
+
+        lower_html = str(soup).lower()
+
+        login_markers = (
+            'name="id"',
+            'name="pw"',
+            "login_ok1_new.asp",
+        )
+
+        if any(
+            marker in lower_html
+            for marker in login_markers
+        ):
+            return False
+
+        return True
 class MenuSalesParser:
 
     """Parse raw menu sales rows without applying canonical menu mapping."""

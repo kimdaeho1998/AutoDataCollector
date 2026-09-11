@@ -35,6 +35,12 @@ DEFAULT_BRAND_IDX = os.environ.get("COLLECTOR_BRAND_IDX")
 DEFAULT_BRAND_NAME = os.environ.get("COLLECTOR_BRAND_NAME")
 
 
+
+
+from sales_data_collector.product_workbook_job import (
+    run_product_workbook_job,
+)
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="Sales Data Collector")
     parser.add_argument(
@@ -68,6 +74,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--template", help="Sales-admin workbook path for production dry-run mode.")
     parser.add_argument("--production-output", help="Output xlsx path for production write mode.")
     parser.add_argument("--mode", choices=[m.value for m in CollectionMode], default=CollectionMode.ADMIN.value)
+    parser.add_argument(
+        "--product-workbook",
+        action="store_true",
+        help=(
+            "Collect monthly Product Detail and write "
+            "a copied Product Workbook"
+        ),
+    )
+
     return parser
 
 
@@ -101,6 +116,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "--base-url, --brand-idx, and --brand-name are required. "
                 "Set COLLECTOR_BASE_URL, COLLECTOR_BRAND_IDX, and COLLECTOR_BRAND_NAME locally."
             )
+        if args.product_workbook:
+            return run_product_workbook(args)
+
         if args.production_dry_run and args.production_write:
             parser.error("--production-dry-run and --production-write cannot be used together")
         if args.menu_mapping_preview and not args.menu_monthly_preview:
@@ -1531,6 +1549,249 @@ def _canonical_quantity(mapping_preview, canonical_code: str) -> int:
         if aggregate.canonical_code == canonical_code:
             return aggregate.quantity
     return 0
+
+
+
+def run_product_workbook(args: argparse.Namespace) -> int:
+    """
+    Collect monthly Product Detail for every store represented
+    in the Product Workbook and write one copied workbook.
+
+    Raw Product Detail remains unfiltered.
+
+    Workbook projection policy:
+    - canonical single-item products -> E:Y
+    - eligible ordinary single-item residual -> Z via AA-SUM(E:Y)
+    - excluded set/delivery/packaging classifications -> excluded
+    - unknown classifications -> fail closed
+    - signed quantity/sales values are preserved
+    """
+
+    if not args.template:
+        raise ValueError(
+            "--template is required for --product-workbook"
+        )
+
+    if not args.output:
+        raise ValueError(
+            "--output is required for --product-workbook"
+        )
+
+    if args.year is None or args.month is None:
+        raise ValueError(
+            "--year and --month are required for --product-workbook"
+        )
+
+    if args.month < 1 or args.month > 12:
+        raise ValueError(
+            "--month must be between 1 and 12"
+        )
+
+    template = Path(
+        args.template
+    )
+
+    output = Path(
+        args.output
+    )
+
+    period_start = date(
+        args.year,
+        args.month,
+        1,
+    )
+
+    period_end = date(
+        args.year,
+        args.month,
+        calendar.monthrange(
+            args.year,
+            args.month,
+        )[1],
+    )
+
+    # Reuse existing workbook profile detection rather than
+    # hard-coding "7월".
+    workbook = load_workbook(
+        template,
+        data_only=False,
+        read_only=True,
+    )
+
+    try:
+
+        profile = infer_menu_template_profile(
+            workbook,
+            month=args.month,
+        )
+
+        sheet_name = (
+            profile.sheet_name
+        )
+
+    finally:
+
+        workbook.close()
+
+    client = ServiceClient(
+        args.base_url
+    )
+
+    try:
+
+        print(
+            "[INFO] Product Workbook target: "
+            f"{period_start.isoformat()} ~ "
+            f"{period_end.isoformat()}"
+        )
+
+        print(
+            f"[INFO] SOURCE={template}"
+        )
+
+        print(
+            f"[INFO] OUTPUT={output}"
+        )
+
+        print(
+            f"[INFO] SHEET={sheet_name}"
+        )
+
+        available_stores = (
+            login_and_get_stores(
+                client,
+                args,
+            )
+        )
+
+        print(
+            f"[INFO] ERP_STORE_COUNT="
+            f"{len(available_stores)}"
+        )
+
+        result = (
+            run_product_workbook_job(
+                client=client,
+                erp_stores=available_stores,
+                brand_idx=args.brand_idx,
+                brand_name=args.brand_name,
+                source_path=template,
+                output_path=output,
+                start_date=period_start,
+                end_date=period_end,
+                sheet_name=sheet_name,
+                progress=True,
+            )
+        )
+
+        print(
+            "=" * 120
+        )
+
+        print(
+            "PRODUCT WORKBOOK RESULT"
+        )
+
+        print(
+            "=" * 120
+        )
+
+        print(
+            f"TARGET_COUNT="
+            f"{result.target_count}"
+        )
+
+        print(
+            f"WRITTEN="
+            f"{result.written_count}"
+        )
+
+        print(
+            f"EMPTY="
+            f"{result.empty_count}"
+        )
+
+        print(
+            f"ERP_NOT_FOUND="
+            f"{result.erp_not_found_count}"
+        )
+
+        print(
+            f"ERP_AMBIGUOUS="
+            f"{result.erp_ambiguous_count}"
+        )
+
+        print(
+            f"ERROR="
+            f"{result.error_count}"
+        )
+
+        print(
+            f"WRITTEN_CELLS="
+            f"{result.written_cell_count}"
+        )
+
+        print(
+            f"ELAPSED_SECONDS="
+            f"{result.elapsed_seconds:.2f}"
+        )
+
+        print(
+            f"SOURCE_SHA256="
+            f"{result.source_sha256}"
+        )
+
+        print(
+            f"OUTPUT_SHA256="
+            f"{result.output_sha256}"
+        )
+
+        print(
+            f"OUTPUT={result.output_path}"
+        )
+
+        if result.failures:
+
+            print(
+                "-" * 120
+            )
+
+            print(
+                "FAILURES"
+            )
+
+            print(
+                "-" * 120
+            )
+
+            for (
+                store_name,
+                reason,
+            ) in result.failures:
+
+                print(
+                    f"[FAIL] "
+                    f"store={store_name} "
+                    f"reason={reason}"
+                )
+
+        print(
+            "=" * 120
+        )
+
+        # Known EMPTY and ERP_NOT_FOUND are not execution
+        # failures. Collection/ambiguity failures are.
+        if (
+            result.error_count
+            or result.erp_ambiguous_count
+        ):
+            return 1
+
+        return 0
+
+    finally:
+
+        client.logout()
 
 
 if __name__ == "__main__":

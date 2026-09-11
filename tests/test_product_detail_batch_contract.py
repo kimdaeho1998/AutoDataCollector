@@ -328,3 +328,264 @@ def test_batch_rejects_reversed_period_without_client_call():
         )
 
     assert client.calls == []
+
+
+
+# =====================================================================
+# P2-D-R4C duplicate ERP store resolution contracts
+# =====================================================================
+
+def _r4c_store(store_id: str, name: str = "선비꼬마김밥 서정리역점"):
+    class StubStore:
+        def __init__(self):
+            self.magic_store_id = store_id
+            self.store_name = name
+
+    return StubStore()
+
+
+def _r4c_result(
+    *,
+    store_id: str,
+    store_name: str,
+    has_records: bool,
+):
+    from datetime import date
+
+    from sales_data_collector.models import (
+        ProductDetailSalesRecord,
+        ProductDetailSalesResult,
+    )
+
+    records = []
+
+    if has_records:
+        records.append(
+            ProductDetailSalesRecord(
+                store_id=store_id,
+                store_name=store_name,
+                period_start=date(2026, 7, 1),
+                period_end=date(2026, 7, 31),
+                product_name="테스트상품",
+                sales_quantity=0,
+                sales_amount=-1000,
+                unit_price=0,
+                classification_name="메뉴",
+            )
+        )
+
+    return ProductDetailSalesResult(
+        store_id=store_id,
+        store_name=store_name,
+        period_start=date(2026, 7, 1),
+        period_end=date(2026, 7, 31),
+        records=records,
+        source_total_sales=(
+            -1000 if has_records else 0
+        ),
+        source_total_quantity=0,
+    )
+
+
+def test_duplicate_seojeongri_selects_only_candidate_with_records():
+    from datetime import date
+
+    from sales_data_collector.product_detail_batch import (
+        ProductDetailBatchCollector,
+        ProductDetailBatchStatus,
+    )
+
+    first = _r4c_store("S1")
+    second = _r4c_store("S2")
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def get_product_detail_sales(self, **kwargs):
+            self.calls.append(kwargs["store_idx"])
+
+            return _r4c_result(
+                store_id=kwargs["store_idx"],
+                store_name=kwargs["store_name"],
+                has_records=(
+                    kwargs["store_idx"] == "S2"
+                ),
+            )
+
+    client = Client()
+
+    result = ProductDetailBatchCollector(
+        client,
+        brand_idx="BRAND",
+        brand_name="선비꼬마김밥",
+    ).collect(
+        stores=[first, second],
+        start_date=date(2026, 7, 1),
+        end_date=date(2026, 7, 31),
+    )
+
+    assert client.calls == ["S1", "S2"]
+    assert result.attempted_store_count == 1
+    assert result.success_count == 1
+    assert result.items[0].store_id == "S2"
+    assert (
+        result.items[0].status
+        is ProductDetailBatchStatus.SUCCESS
+    )
+
+    # No second ERP request after duplicate resolution.
+    assert client.calls.count("S2") == 1
+
+
+def test_duplicate_seojeongri_zero_and_negative_values_still_count_as_data():
+    from datetime import date
+
+    from sales_data_collector.product_detail_batch import (
+        ProductDetailBatchCollector,
+    )
+
+    first = _r4c_store("S1")
+    second = _r4c_store("S2")
+
+    class Client:
+        def get_product_detail_sales(self, **kwargs):
+            return _r4c_result(
+                store_id=kwargs["store_idx"],
+                store_name=kwargs["store_name"],
+                has_records=(
+                    kwargs["store_idx"] == "S1"
+                ),
+            )
+
+    result = ProductDetailBatchCollector(
+        Client(),
+        brand_idx="BRAND",
+        brand_name="선비꼬마김밥",
+    ).collect(
+        stores=[first, second],
+        start_date=date(2026, 7, 1),
+        end_date=date(2026, 7, 31),
+    )
+
+    assert result.success_count == 1
+    assert result.items[0].store_id == "S1"
+
+    record = result.items[0].result.records[0]
+
+    assert record.sales_quantity == 0
+    assert record.sales_amount == -1000
+
+
+def test_duplicate_seojeongri_both_empty_fails_closed():
+    from datetime import date
+
+    import pytest
+
+    from sales_data_collector.product_detail_batch import (
+        ProductDetailBatchCollector,
+        ProductDetailEmptyAmbiguousStoreError,
+    )
+
+    stores = [
+        _r4c_store("S1"),
+        _r4c_store("S2"),
+    ]
+
+    class Client:
+        def get_product_detail_sales(self, **kwargs):
+            return _r4c_result(
+                store_id=kwargs["store_idx"],
+                store_name=kwargs["store_name"],
+                has_records=False,
+            )
+
+    with pytest.raises(
+        ProductDetailEmptyAmbiguousStoreError
+    ):
+        ProductDetailBatchCollector(
+            Client(),
+            brand_idx="BRAND",
+            brand_name="선비꼬마김밥",
+        ).collect(
+            stores=stores,
+            start_date=date(2026, 7, 1),
+            end_date=date(2026, 7, 31),
+        )
+
+
+def test_duplicate_seojeongri_both_have_data_fails_closed():
+    from datetime import date
+
+    import pytest
+
+    from sales_data_collector.product_detail_batch import (
+        ProductDetailAmbiguousDataStoreError,
+        ProductDetailBatchCollector,
+    )
+
+    stores = [
+        _r4c_store("S1"),
+        _r4c_store("S2"),
+    ]
+
+    class Client:
+        def get_product_detail_sales(self, **kwargs):
+            return _r4c_result(
+                store_id=kwargs["store_idx"],
+                store_name=kwargs["store_name"],
+                has_records=True,
+            )
+
+    with pytest.raises(
+        ProductDetailAmbiguousDataStoreError
+    ):
+        ProductDetailBatchCollector(
+            Client(),
+            brand_idx="BRAND",
+            brand_name="선비꼬마김밥",
+        ).collect(
+            stores=stores,
+            start_date=date(2026, 7, 1),
+            end_date=date(2026, 7, 31),
+        )
+
+
+def test_non_duplicate_store_path_remains_single_request():
+    from datetime import date
+
+    from sales_data_collector.product_detail_batch import (
+        ProductDetailBatchCollector,
+    )
+
+    store = _r4c_store(
+        "NORMAL1",
+        "선비꼬마김밥 갈마점",
+    )
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def get_product_detail_sales(self, **kwargs):
+            self.calls += 1
+
+            return _r4c_result(
+                store_id=kwargs["store_idx"],
+                store_name=kwargs["store_name"],
+                has_records=True,
+            )
+
+    client = Client()
+
+    ProductDetailBatchCollector(
+        client,
+        brand_idx="BRAND",
+        brand_name="선비꼬마김밥",
+    ).collect(
+        stores=[store],
+        start_date=date(2026, 7, 1),
+        end_date=date(2026, 7, 31),
+    )
+
+    assert client.calls == 1

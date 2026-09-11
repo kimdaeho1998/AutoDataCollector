@@ -178,6 +178,36 @@ def _compare_numeric_cell(
             reason="FORMULA_IN_NUMERIC_TARGET",
         )
 
+    # R15-D3 business rule:
+    #
+    # The Product Workbook uses "-" as an operational zero
+    # placeholder. When a valid numeric proposal exists, the
+    # textual placeholder must be physically replaced by that
+    # numeric value in the output workbook.
+    #
+    # Examples:
+    #   "-" + 0     -> READY -> write numeric 0
+    #   "-" + 15000 -> READY -> write 15000
+    #   "-" + -3000 -> READY -> write -3000
+    #
+    # proposed_value=None has already been blocked above as
+    # PROPOSED_VALUE_MISSING and is never coerced to zero.
+    if (
+        isinstance(current_value, str)
+        and current_value.strip() == "-"
+    ):
+        return ProductWorkbookDryRunCell(
+            coordinate=coordinate,
+            kind=kind,
+            canonical_key=canonical_key,
+            current_value=current_value,
+            proposed_value=proposed,
+            status=(
+                ProductWorkbookDryRunStatus.READY
+            ),
+            reason="DASH_ZERO_PLACEHOLDER",
+        )
+
     if not _is_numeric(current_value):
         return ProductWorkbookDryRunCell(
             coordinate=coordinate,
